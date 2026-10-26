@@ -111,6 +111,8 @@ typedef struct
     uint64_t x_addr[4], x_size[4];
     uint64_t a_addr[4], a_size[4];
     uint64_t b_addr[4], b_size[4];
+    uint32_t num_c;
+    uint64_t c_addr[4], c_size[4]; // receive list (pointer buffers)
 } hipc_msg_t;
 
 static void parse_hipc(uint64_t msg, hipc_msg_t *m)
@@ -148,6 +150,26 @@ static void parse_hipc(uint64_t msg, hipc_msg_t *m)
         else if (n < m->num_a + m->num_b) { m->b_addr[(n - m->num_a) & 3] = addr; m->b_size[(n - m->num_a) & 3] = size; }
     }
     m->data = p;
+    // Receive list (C descriptors) follows the raw data words.
+    uint32_t mode = (w1 >> 10) & 0xF;
+    m->num_c = mode == 2 ? 1 : mode > 2 ? mode - 2 : 0;
+    uint64_t cp = p + 4ull * m->num_data_words;
+    for (uint32_t i = 0; i < m->num_c && i < 4; ++i, cp += 8) {
+        uint32_t lo = rd32(cp), hi = rd32(cp + 4);
+        m->c_addr[i] = lo | ((uint64_t)(hi & 0xFFFF) << 32);
+        m->c_size[i] = hi >> 16;
+    }
+}
+
+// Output buffer i of an "auto select" parameter: the B buffer, or the C (pointer) buffer
+// when the client chose the pointer path and left B empty.
+static uint64_t out_buf(const hipc_msg_t *m, int i, uint64_t *size)
+{
+    if (i < (int)m->num_b && m->b_addr[i]) { *size = m->b_size[i]; return m->b_addr[i]; }
+    if (i < (int)m->num_c && m->c_addr[i]) { *size = m->c_size[i]; return m->c_addr[i]; }
+    if (i < (int)m->num_x) { *size = m->x_size[i]; return m->x_addr[i]; }
+    *size = 0;
+    return 0;
 }
 
 // ---- responses ------------------------------------------------------------------
@@ -297,6 +319,7 @@ static const struct { const char *iface; uint32_t cmd; int signaled; } k_events[
 };
 
 static uint32_t g_unknown_logged;
+static __thread uint64_t g_current_msg;
 
 static void handle_request(request_t *q, reply_t *r)
 {
@@ -361,9 +384,8 @@ static void handle_request(request_t *q, reply_t *r)
         hipc_msg_t *m = q->msg;
         switch (q->cmd) {
         case 0: { // Read(offset, size) -> buffer
-            uint64_t off = rd64(q->in), size = rd64(q->in + 8);
-            uint64_t buf = m->num_b ? m->b_addr[0] : m->x_addr[0];
-            uint64_t cap = m->num_b ? m->b_size[0] : m->x_size[0];
+            uint64_t off = rd64(q->in), size = rd64(q->in + 8), cap = 0;
+            uint64_t buf = out_buf(m, 0, &cap);
             if (size > cap)
                 size = cap;
             romfs_read(off, mem_host(buf), size);
@@ -373,6 +395,87 @@ static void handle_request(request_t *q, reply_t *r)
         }
         case 4: reply_u64(r, romfs_size()); return; // GetSize
         default: break;
+        }
+    }
+    if (!strncmp(q->iface, "acc:u", 5)) {
+        static const uint64_t uid[2] = { 0x0123456789ABCDEFull, 0xFEDCBA9876543210ull };
+        switch (q->cmd) {
+        case 0: reply_u32(r, 1); return;                          // GetUserCount
+        case 1: reply_u32(r, 1); return;                          // GetUserExistence(uid) -> true
+        case 2: case 3: {                                         // ListAllUsers / ListOpenUsers -> buffer
+            uint64_t n = 0, dst = out_buf(q->msg, 0, &n);
+            if (dst && n >= 16) g_write(dst, uid, 16);
+            return;
+        }
+        case 4: reply_u64(r, uid[0]); reply_u64(r, uid[1]); return; // GetLastOpenedUser
+        case 5: reply_object(q, r, "acc:IProfile"); return;        // GetProfile(uid)
+        case 100: case 140: case 160: return;                      // InitializeApplicationInfo*
+        case 101: reply_object(q, r, "acc:IManagerForApplication"); return;
+        case 150: reply_u32(r, 0); return;                         // IsUserAccountSwitchLocked -> false
+        default: break;
+        }
+    }
+    if (!strcmp(q->iface, "acc:IProfile")) {
+        if (q->cmd == 0 || q->cmd == 1) { // Get / GetBase -> ProfileBase {uid, timestamp, nickname[0x21]}
+            uint8_t base[0x38] = {0};
+            static const uint64_t uid[2] = { 0x0123456789ABCDEFull, 0xFEDCBA9876543210ull };
+            memcpy(base, uid, 16);
+            memcpy(base + 0x18, "Player", 7);
+            memcpy(r->data, base, sizeof base);
+            r->data_size = sizeof base;
+            return;
+        }
+        if (q->cmd == 10) { reply_u32(r, 0); return; } // GetImageSize -> 0
+    }
+    if (!strcmp(q->iface, "am:IApplicationFunctions")) {
+        switch (q->cmd) {
+        case 1: { // PopLaunchParameter(kind) -> IStorage
+            uint32_t kind = rd32(q->in);
+            static int popped;
+            if (kind != 2 || popped++) { // only a preselected user is provided, once
+                r->result = 0x480; // am: no data in channel
+                return;
+            }
+            host_log("ipc: am: launch parameter: preselected user");
+            reply_object(q, r, "am:IStorage(preselected-user)");
+            return;
+        }
+        case 20: reply_u64(r, 0); return; // EnsureSaveData(uid) -> required size 0 (exists)
+        case 21: // GetDesiredLanguage -> u64 language code
+            reply_u64(r, 0x00000053552D6E65ull); // "en-US"
+            return;
+        case 23: { // GetDisplayVersion -> char[0x10]
+            memcpy(r->data, "1.1.0", 6);
+            r->data_size = 0x10;
+            return;
+        }
+        default: break;
+        }
+    }
+    if (!strncmp(q->iface, "am:IStorage", 11))
+        host_log("ipc: %s cmd %u (in %u bytes, X%u A%u B%u, in[0]=0x%llx)", q->iface, q->cmd, q->in_size, q->msg->num_x,
+                 q->msg->num_a, q->msg->num_b, (unsigned long long)(q->in_size >= 8 ? rd64(q->in) : 0));
+    if (!strncmp(q->iface, "am:IStorage(", 12)) {
+        if (q->cmd == 0) { reply_object(q, r, "am:IStorageAccessor(preselected-user)"); return; } // Open
+    }
+    if (!strncmp(q->iface, "am:IStorageAccessor(", 20)) {
+        // Preselected user launch parameter: magic, flag, user id (0x88 bytes in total).
+        uint8_t blob[0x88] = {0};
+        uint32_t magic = 0xC79497CA, one = 1;
+        uint64_t uid[2] = { 0x0123456789ABCDEFull, 0xFEDCBA9876543210ull };
+        memcpy(blob, &magic, 4);
+        memcpy(blob + 4, &one, 4);
+        memcpy(blob + 8, uid, 16);
+        if (q->cmd == 0) { reply_u64(r, sizeof blob); return; } // GetSize
+        if (q->cmd == 11) { // Read(offset) -> buffer
+            uint64_t off = rd64(q->in), n = 0;
+            uint64_t dst = out_buf(q->msg, 0, &n);
+            if (off < sizeof blob) {
+                uint64_t k = sizeof blob - off < n ? sizeof blob - off : n;
+                g_write(dst, blob + off, k);
+            }
+
+            return;
         }
     }
     if (!strcmp(q->iface, "am:IWindowController") && q->cmd == 1) { // GetAppletResourceUserId
@@ -445,6 +548,7 @@ static uint32_t handle_control(session_t *s, uint64_t msg, hipc_msg_t *m, uint32
 
 uint32_t ipc_send_sync_request(cpu_t *c, uint32_t handle, uint64_t msg, uint64_t msg_size)
 {
+    g_current_msg = msg;
     (void)c; (void)msg_size;
     session_t *s = session_get(handle);
     if (!s)

@@ -76,6 +76,21 @@ static uint64_t read_npdm(const char *dir, uint32_t *stack_size, int *prio, int 
     return pid;
 }
 
+static void report_guest_state(void)
+{
+    guest_thread_t *t = kernel_current_thread();
+    if (!t)
+        return;
+    const cpu_t *c = &t->cpu;
+    printf("guest thread 0x%x registers (compiled code keeps them in memory at -O0):\n", t->handle);
+    for (int i = 0; i < 31; i += 4)
+        printf("  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, (unsigned long long)c->x[i],
+               i + 1, (unsigned long long)(i + 1 < 31 ? c->x[i + 1] : 0), i + 2,
+               (unsigned long long)(i + 2 < 31 ? c->x[i + 2] : 0), i + 3,
+               (unsigned long long)(i + 3 < 31 ? c->x[i + 3] : c->sp));
+    guest_backtrace(c);
+}
+
 static void report_fault(uint8_t *a)
 {
     if (a >= recomp_mem_base && a < recomp_mem_base + (1ull << GUEST_ADDR_BITS))
@@ -83,6 +98,7 @@ static void report_fault(uint8_t *a)
                (unsigned long long)(a - recomp_mem_base), addr_describe((uint64_t)(a - recomp_mem_base)));
     else
         printf("FATAL: host fault at host address %p\n", (void *)a);
+    report_guest_state();
 }
 
 #ifdef _WIN32

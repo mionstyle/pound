@@ -517,7 +517,7 @@ void kernel_svc(cpu_t *c, uint32_t imm)
         tl_current = c->host;
     pthread_mutex_lock(&K);
     kernel_svc_locked(c, imm);
-    if (host_verbose && imm != 0x1E && imm != 0x10 && (uint32_t)c->x[0] != 0)
+    if (host_verbose && imm != 0x1E && imm != 0x10 && imm != 0x0B && (uint32_t)c->x[0] != 0)
         host_log("  -> svc 0x%02x %s failed: 0x%x (thread 0x%x)", imm, svc_name(imm), (uint32_t)c->x[0],
                  tl_current ? tl_current->handle : 0);
     pthread_mutex_unlock(&K);

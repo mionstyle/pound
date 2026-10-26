@@ -37,6 +37,7 @@ static void nvn_unimplemented(cpu_t *c)
 }
 
 static void hle_nvnDeviceGetProcAddress(cpu_t *c);
+hle_fn_t    nvn_lookup(const char *name, void **user);
 
 // NVN2 procedures implemented on the host (the rest log and return 0).
 static const struct { const char *name; hle_fn_t fn; } k_nvn_impl[] = {
@@ -62,10 +63,16 @@ static uint64_t nvn_proc(const char *name)
     snprintf(p->name, sizeof p->name, "%s", name);
     pthread_mutex_unlock(&g_procs_lock);
     hle_fn_t fn = nvn_unimplemented;
+    void    *user = p;
+    int      special = 0;
     for (size_t i = 0; i < sizeof k_nvn_impl / sizeof k_nvn_impl[0]; ++i)
-        if (!strcmp(k_nvn_impl[i].name, name))
-            fn = k_nvn_impl[i].fn;
-    p->addr = hle_thunk(p->name, fn, p);
+        if (!strcmp(k_nvn_impl[i].name, name)) {
+            fn      = k_nvn_impl[i].fn;
+            special = 1;
+        }
+    if (!special)
+        fn = nvn_lookup(name, &user); // host NVN2 implementation (hle_nvn.c)
+    p->addr = hle_thunk(p->name, fn, user ? user : p);
     if (!g_proc_list) {
         const char *path = getenv("RECOMP_NVN_LIST");
         g_proc_list = fopen(path ? path : "nvn_procs.txt", "w");
