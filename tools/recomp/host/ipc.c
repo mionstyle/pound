@@ -263,6 +263,33 @@ static const struct { const char *iface; uint32_t cmd; const char *ret; } k_retu
     { "am:IApplicationProxy", 20, "am:IApplicationFunctions" },
     { "am:IApplicationProxy", 1000, "am:IDebugFunctions" },
     { "hid", 0, "hid:IAppletResource" },
+    { "time:u", 0, "time:ISystemClock(user)" },
+    { "time:u", 1, "time:ISystemClock(network)" },
+    { "time:u", 2, "time:ISteadyClock" },
+    { "time:u", 3, "time:ITimeZoneService" },
+    { "time:u", 4, "time:ISystemClock(local)" },
+    { "pctl", 0, "pctl:IParentalControlService" },
+    { "pctl", 1, "pctl:IParentalControlService" },
+    { "pctl:s", 0, "pctl:IParentalControlService" },
+    { "pctl:s", 1, "pctl:IParentalControlService" },
+    { "pctl:a", 0, "pctl:IParentalControlService" },
+    { "pctl:a", 1, "pctl:IParentalControlService" },
+    { "pctl:r", 0, "pctl:IParentalControlService" },
+    { "pctl:r", 1, "pctl:IParentalControlService" },
+};
+
+// Commands known to return a (copy) handle to an event: (interface, command, initially signalled).
+static const struct { const char *iface; uint32_t cmd; int signaled; } k_events[] = {
+    { "am:IApplicationFunctions", 130, 0 }, // GetGpuErrorDetectedSystemEvent
+    { "am:ISelfController", 91, 0 },        // GetAccumulatedSuspendedTickChangedEvent
+    { "am:ISelfController", 1, 0 },         // (Switch 1) LockExit-related event
+    { "am:ICommonStateGetter", 61, 0 },     // GetDefaultDisplayResolutionChangeEvent
+    { "am:IApplicationFunctions", 167, 0 }, // GetHealthWarningDisappearedSystemEvent
+    { "am:IApplicationFunctions", 210, 0 }, // GetUnknownEvent / friend invitation
+    { "aoc:u", 8, 0 },                      // GetAddOnContentListChangedEvent
+    { "aoc:u", 10, 0 },                     // GetAddOnContentListChangedEventWithProcessId
+    { "time:u", 20, 0 },                    // (placeholder: shared memory handled below)
+    { "hid:IAppletResource", 0, 0 },
 };
 
 static uint32_t g_unknown_logged;
@@ -326,6 +353,12 @@ static void handle_request(request_t *q, reply_t *r)
         default: break;
         }
     }
+    for (size_t i = 0; i < sizeof k_events / sizeof k_events[0]; ++i)
+        if (!strcmp(k_events[i].iface, q->iface) && k_events[i].cmd == q->cmd && strcmp(q->iface, "time:u")) {
+            r->copy[r->num_copy++] = kernel_new_event(k_events[i].signaled, NULL);
+            host_log("ipc: %s cmd %u -> new event", q->iface, q->cmd);
+            return;
+        }
     for (size_t i = 0; i < sizeof k_returns / sizeof k_returns[0]; ++i)
         if (!strcmp(k_returns[i].iface, q->iface) && k_returns[i].cmd == q->cmd) {
             host_log("ipc: %s cmd %u -> new %s", q->iface, q->cmd, k_returns[i].ret);

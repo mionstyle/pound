@@ -385,6 +385,7 @@ static void svc_get_info(cpu_t *c)
     case 28: out = 0; break;                                // alias region extra size
     case 29: out = EXTRA_REGION_BASE; break;                // Switch 2: unknown region (address)
     case 30: out = EXTRA_REGION_SIZE; break;                // Switch 2: unknown region (size)
+    case 33: out = 0; break;                                // Switch 2: size the SDK maps with MapPhysicalMemory at the alias region start
     default:
         host_log("GetInfo: unknown id 0x%x / 0x%llx", id0, (unsigned long long)id1);
         RET(R_INVALID_ENUM);
@@ -490,6 +491,9 @@ void kernel_svc(cpu_t *c, uint32_t imm)
         tl_current = c->host;
     pthread_mutex_lock(&K);
     kernel_svc_locked(c, imm);
+    if (host_verbose && imm != 0x1E && imm != 0x10 && (uint32_t)c->x[0] != 0)
+        host_log("  -> svc 0x%02x %s failed: 0x%x (thread 0x%x)", imm, svc_name(imm), (uint32_t)c->x[0],
+                 tl_current ? tl_current->handle : 0);
     pthread_mutex_unlock(&K);
 }
 
@@ -664,6 +668,8 @@ static void kernel_svc_locked(cpu_t *c, uint32_t imm)
     }
     case 0x29: svc_get_info(c); return;
     case 0x2C: // MapPhysicalMemory(addr, size)
+        if (X(1) == 0)
+            RET(R_OK);
         if (mem_map(X(0), X(1), MS_ALIAS, MP_RW))
             RET(R_INVALID_MEMSTATE);
         RET(R_OK);
