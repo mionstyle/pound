@@ -264,6 +264,8 @@ static int reply_object(request_t *q, reply_t *r, const char *iface)
             if (!s->domain[i]) {
                 s->domain[i] = obj;
                 r->out_objects[r->num_out_objects++] = (uint32_t)i;
+                if (getenv("RECOMP_IPC_TRACE"))
+                    host_log("ipc: session 0x%x domain id %d = %s (from %s cmd %u)", s->handle, i, iface, q->iface, q->cmd);
                 return obj;
             }
         host_fatal("domain full");
@@ -384,6 +386,7 @@ static const struct { const char *iface; uint32_t cmd; const char *ret; } k_retu
     { "am:IApplicationProxy", 40, "am:IApplicationProxy.40" },
     { "am:IApplicationProxy", 60, "am:IApplicationProxy.60" },
     { "hid", 0, "hid:IAppletResource" },
+    { "hid", 203, "hid:IActiveVibrationDeviceList" },         // CreateActiveVibrationDeviceList
     { "time:u", 0, "time:ISystemClock(user)" },
     { "time:u", 1, "time:ISystemClock(network)" },
     { "time:u", 2, "time:ISteadyClock" },
@@ -734,9 +737,20 @@ uint32_t ipc_send_sync_request(cpu_t *c, uint32_t handle, uint64_t msg, uint64_t
         uint8_t  dtype = rd8(h);
         uint16_t dsize = (uint16_t)(rd8(h + 2) | rd8(h + 3) << 8);
         uint32_t oid   = rd32(h + 4);
-        if (oid >= 64 || !s->domain[oid])
-            host_fatal("ipc: bad domain object id %u", oid);
+        if (oid >= 64 || !s->domain[oid]) {
+            char ids[256] = "";
+            int  k = 0;
+            for (int i = 1; i < 64 && k < 200; ++i)
+                if (s->domain[i]) k += snprintf(ids + k, sizeof ids - k, " %d=%s", i, objects[s->domain[i]].iface);
+            host_log("ipc: session 0x%x: bad domain object id %u (type %u, cmd %u); live:%s", handle, oid, dtype,
+                     rd32(h + 16 + 8), ids);
+            r.result = 0xF601; // sf: invalid object id
+            write_cmif_reply(msg, &r, 1);
+            return R_OK;
+        }
         if (dtype == 2) { // close object
+            if (getenv("RECOMP_IPC_TRACE"))
+                host_log("ipc: session 0x%x domain id %u closed (%s)", handle, oid, objects[s->domain[oid]].iface);
             s->domain[oid] = 0;
             write_cmif_reply(msg, &r, 1);
             return R_OK;

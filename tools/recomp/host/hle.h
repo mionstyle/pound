@@ -22,6 +22,7 @@ int         hle_addresses(uint64_t *out, int max); // replaced module addresses 
 uint64_t    hle_thunk(const char *name, hle_fn_t fn, void *user);
 void       *hle_user(cpu_t *c);
 uint64_t    hle_symbol_address(const char *name);
+void        hle_dump_stats(int top);
 const char *hle_symbol_name(uint64_t addr);
 
 // Guest memory for objects created by host code (bump allocator, zeroed).

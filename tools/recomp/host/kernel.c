@@ -527,7 +527,7 @@ static void kernel_svc_locked(cpu_t *c, uint32_t imm)
 {
     ++g_svc_count;
     ++g_svc_hist[imm & 0xFF];
-    if (host_verbose)
+    if (host_verbose > 1)
         host_log("svc 0x%02x %-28s x0=%llx x1=%llx x2=%llx x3=%llx  from %s (lr %s)", imm, svc_name(imm),
                  (unsigned long long)X(0), (unsigned long long)X(1), (unsigned long long)X(2),
                  (unsigned long long)X(3), addr_describe(c->pc), addr_describe(c->x[30]));
@@ -749,12 +749,16 @@ static void kernel_svc_locked(cpu_t *c, uint32_t imm)
             wr32(addr, (uint32_t)(value + 1));
         } else if (type == 2) { // SignalAndModifyByWaitingCountIfEqual
             if ((int32_t)rd32(addr) != value) RET(R_INVALID_STATE);
+            // Mirrors KAddressArbiter::SignalAndModifyByWaitingCountIfEqual: `extra` counts
+            // the waiters after the first one, capped at count + 1.
             int n = count_waiters(W_ARBITER, addr);
             int32_t nv;
             if (count <= 0) nv = n > 0 ? value - 2 : value + 1;
             else if (n == 0) nv = value + 1;
-            else if (n <= count) nv = value - 1;
-            else nv = value;
+            else {
+                int extra = n - 1 < count + 1 ? n - 1 : count + 1;
+                nv = extra == 0 ? value + 1 : extra <= count ? value - 1 : value;
+            }
             wr32(addr, (uint32_t)nv);
         }
         wake_arbiter(addr, count);

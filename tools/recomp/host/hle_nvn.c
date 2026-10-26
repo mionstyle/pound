@@ -14,6 +14,7 @@
 //   anything else         -> 0
 
 #include "hle.h"
+#include "present.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -150,6 +151,58 @@ static void dev_GetInteger(cpu_t *c) // (device, NVNdeviceInfo pname, int* value
         0x400000,// 43 L2_SIZE
         15,      // 44 MAX_TEXTURE_LEVELS
         2048,    // 45 MAX_TEXTURE_LAYERS
+        1,       // 46 GLSLC_MAX_SUPPORTED_GPU_CODE_MAJOR_VERSION
+        1,       // 47 GLSLC_MIN_SUPPORTED_GPU_CODE_MAJOR_VERSION
+        99,      // 48 GLSLC_MAX_SUPPORTED_GPU_CODE_MINOR_VERSION
+        0,       // 49 GLSLC_MIN_SUPPORTED_GPU_CODE_MINOR_VERSION
+        1,       // 50 SUPPORTS_CONSERVATIVE_RASTER
+        8,       // 51 SUBPIXEL_BITS
+        8,       // 52 MAX_SUBPIXEL_BIAS_BITS
+        4,       // 53 INDIRECT_DISPATCH_ALIGNMENT
+        32,      // 54 ZCULL_SAVE_RESTORE_ALIGNMENT
+        256,     // 55 SHADER_SCRATCH_MEMORY_COMPUTE_SCALE_FACTOR_MINIMUM
+        32,      // 56 LINEAR_TEXTURE_STRIDE_ALIGNMENT
+        128,     // 57 LINEAR_RENDER_TARGET_STRIDE_ALIGNMENT
+        4096,    // 58 MEMORY_POOL_PAGE_SIZE
+        1,       // 59 SUPPORTS_ZERO_FROM_UNMAPPED_VIRTUAL_POOL_PAGES
+        4,       // 60 UNIFORM_BUFFER_UPDATE_ALIGNMENT
+        16384,   // 61 MAX_TEXTURE_SIZE
+        134217728, // 62 MAX_BUFFER_TEXTURE_SIZE
+        2048,    // 63 MAX_3D_TEXTURE_SIZE
+        16384,   // 64 MAX_CUBE_MAP_TEXTURE_SIZE
+        16384,   // 65 MAX_RECTANGLE_TEXTURE_SIZE
+        1,       // 66 SUPPORTS_PASSTHROUGH_GEOMETRY_SHADERS
+        1,       // 67 SUPPORTS_VIEWPORT_SWIZZLE
+        1,       // 68 SUPPORTS_SPARSE_TILED_PACKAGED_TEXTURES
+        1,       // 69 SUPPORTS_ADVANCED_BLEND_MODES
+        5,       // 70 MAX_PRESENT_INTERVAL
+        1,       // 71 SUPPORTS_DRAW_TEXTURE
+        1,       // 72 SUPPORTS_TARGET_INDEPENDENT_RASTERIZATION
+        1,       // 73 SUPPORTS_FRAGMENT_COVERAGE_TO_COLOR
+        1,       // 74 SUPPORTS_POST_DEPTH_COVERAGE
+        1,       // 75 SUPPORTS_IMAGES_USING_TEXTURE_HANDLES
+        1,       // 76 SUPPORTS_SAMPLE_LOCATIONS
+        16,      // 77 MAX_SAMPLE_LOCATION_TABLE_ENTRIES
+        1024,    // 78 SHADER_CODE_MEMORY_POOL_PADDING_SIZE
+        32,      // 79 MAX_PATCH_SIZE
+        0x1000,  // 80 QUEUE_COMMAND_MEMORY_GRANULARITY
+        0x10000, // 81 QUEUE_COMMAND_MEMORY_MIN_SIZE
+        0x100000,// 82 QUEUE_COMMAND_MEMORY_DEFAULT_SIZE
+        0x1000,  // 83 QUEUE_COMPUTE_MEMORY_GRANULARITY
+        0x10000, // 84 QUEUE_COMPUTE_MEMORY_MIN_SIZE
+        0x40000, // 85 QUEUE_COMPUTE_MEMORY_DEFAULT_SIZE
+        0x2000,  // 86 QUEUE_COMMAND_MEMORY_MIN_FLUSH_THRESHOLD
+        1,       // 87 SUPPORTS_FRAGMENT_SHADER_INTERLOCK
+        4,       // 88 MAX_TEXTURES_PER_WINDOW
+        2,       // 89 MIN_TEXTURES_PER_WINDOW
+        0,       // 90 SUPPORTS_DEBUG_LAYER
+        0x4000,  // 91 QUEUE_CONTROL_MEMORY_MIN_SIZE
+        0x8000,  // 92 QUEUE_CONTROL_MEMORY_DEFAULT_SIZE
+        0x1000,  // 93 QUEUE_CONTROL_MEMORY_GRANULARITY
+        128,     // 94 SEPARATE_TEXTURE_BINDINGS_PER_STAGE
+        32,      // 95 SEPARATE_SAMPLER_BINDINGS_PER_STAGE
+        0xFFFF,  // 96 DEBUG_GROUPS_MAX_DOMAIN_ID
+        1,       // 97 EVENTS_SUPPORT_REDUCTION_OPERATIONS
     };
     int32_t v = pname < sizeof k_info / sizeof k_info[0] ? k_info[pname] : 0;
     // Values are filled in as the game's needs become known (logged once per pname).
@@ -210,7 +263,32 @@ static void buf_GetSize(cpu_t *c) { RET(prop_get(A(0), "Storage", 2)); }
 static void tex_builder_SetSize2D(cpu_t *c) { uint64_t v[3] = { A(1), A(2), 1 }; prop_set(A(0), "Size", v, 3); }
 static void tex_builder_SetSize3D(cpu_t *c) { uint64_t v[3] = { A(1), A(2), A(3) }; prop_set(A(0), "Size", v, 3); }
 static void tex_builder_SetSize1D(cpu_t *c) { uint64_t v[3] = { A(1), 1, 1 }; prop_set(A(0), "Size", v, 3); }
+static void tex_builder_SetAxis(cpu_t *c, int axis)
+{
+    uint64_t v[3] = { prop_get(A(0), "Size", 0), prop_get(A(0), "Size", 1), prop_get(A(0), "Size", 2) };
+    v[axis]       = A(1);
+    prop_set(A(0), "Size", v, 3);
+}
+static void tex_builder_SetWidth(cpu_t *c) { tex_builder_SetAxis(c, 0); }
+static void tex_builder_SetHeight(cpu_t *c) { tex_builder_SetAxis(c, 1); }
+static void tex_builder_SetDepth(cpu_t *c) { tex_builder_SetAxis(c, 2); }
 static void tex_builder_SetLevels(cpu_t *c) { uint64_t v[1] = { A(1) }; prop_set(A(0), "Levels", v, 1); }
+
+// Bytes per texel of an NVNformat (NVN numbering, which NVN2 keeps: RGBA8 = 37). Block
+// compressed formats (BCn, ASTC: id >= 65) use at most one byte per texel.
+static uint64_t format_bpp(uint64_t f)
+{
+    if (f == 0 || f >= 65) return 1;
+    if (f <= 4 || f == 49) return 1;                       // R8*, STENCIL8
+    if (f <= 9 || (f >= 13 && f <= 16) || f == 50 || (f >= 57 && f <= 60)) return 2;
+    if (f <= 12 || (f >= 17 && f <= 21) || (f >= 37 && f <= 40) || f == 51 || f == 52 || f == 53 ||
+        (f >= 55 && f <= 56) || (f >= 61 && f <= 64))
+        return 4;
+    if (f >= 25 && f <= 28) return 3;                      // RGB8*
+    if ((f >= 22 && f <= 24) || (f >= 41 && f <= 45) || f == 54 || (f >= 29 && f <= 33)) return 8;
+    if (f >= 34 && f <= 36) return 12;
+    return 16;                                             // RGBA32*
+}
 
 static void tex_builder_GetStorageSize(cpu_t *c)
 {
@@ -218,8 +296,8 @@ static void tex_builder_GetStorageSize(cpu_t *c)
     if (!w) w = 1;
     if (!h) h = 1;
     if (!d) d = 1;
-    uint64_t size = w * h * d * 16; // 16 bytes per texel: >= every format
-    size = size + size / 3;          // mip chain
+    uint64_t size = w * h * d * format_bpp(prop_get(A(0), "Format", 0));
+    size += size / 3 + 0x1000; // mip chain and tiling padding
     RET((size + 0xFFFF) & ~0xFFFFull);
 }
 
@@ -241,9 +319,7 @@ static void tex_GetWidth(cpu_t *c) { RET(prop_get(A(0), "Size", 0)); }
 static void tex_GetHeight(cpu_t *c) { RET(prop_get(A(0), "Size", 1)); }
 static void tex_GetDepth(cpu_t *c) { RET(prop_get(A(0), "Size", 2)); }
 
-// Command buffers: recording returns a non-zero handle; memory is always "free".
-static uint64_t g_cmd_handle = 0x100000;
-static void cmd_EndRecording(cpu_t *c) { RET(__atomic_add_fetch(&g_cmd_handle, 1, __ATOMIC_RELAXED)); }
+// Command buffers: memory is always "free".
 static void cmd_GetMemoryFree(cpu_t *c) { (void)c; RET(0x100000); }
 
 // Window: textures are acquired round-robin.
@@ -271,12 +347,258 @@ static void win_AcquireTexture(cpu_t *c) // (window, sync, int* index) -> NVNwin
 
 static void win_GetNumTextures(cpu_t *c) { RET(prop_get(A(0), "Textures", 0)); }
 
+
+// ---- host renderer, step 1: command recording, clears and presentation -----------------
+//
+// Every texture used as a render target gets a host RGBA8 image ("shadow"). Command
+// buffers are recorded into host command lists, executed at nvnQueueSubmitCommands.
+// Supported so far: SetRenderTargets, ClearColor, CallCommands. Draws are counted only.
+
+typedef struct
+{
+    uint64_t  tex;
+    int       w, h;
+    uint32_t *px;
+} shadow_t;
+
+#define MAX_SHADOWS 512
+static shadow_t        g_shadows[MAX_SHADOWS];
+static int             g_nshadows;
+static pthread_mutex_t g_rlock = PTHREAD_MUTEX_INITIALIZER;
+
+static shadow_t *shadow_of(uint64_t tex)
+{
+    if (!tex)
+        return NULL;
+    for (int i = 0; i < g_nshadows; ++i)
+        if (g_shadows[i].tex == tex)
+            return &g_shadows[i];
+    int w = (int)prop_get(tex, "Size", 0), h = (int)prop_get(tex, "Size", 1);
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192 || g_nshadows >= MAX_SHADOWS)
+        return NULL;
+    shadow_t *s = &g_shadows[g_nshadows++];
+    s->tex = tex;
+    s->w   = w;
+    s->h   = h;
+    s->px  = calloc((size_t)w * h, 4);
+    host_log("render: new target 0x%llx %dx%d format %llu", (unsigned long long)tex, w, h,
+             (unsigned long long)prop_get(tex, "Format", 0));
+    return s;
+}
+
+enum { OP_RT, OP_CLEAR, OP_CALL, OP_DRAW };
+typedef struct
+{
+    int      op;
+    uint64_t a[9];
+    float    f[4];
+} rop_t;
+
+typedef struct
+{
+    rop_t *ops;
+    int    n, cap;
+} rlist_t;
+
+typedef struct
+{
+    uint64_t cmdbuf; // recording command buffer
+    rlist_t  cur;
+} recorder_t;
+
+#define MAX_REC 256
+static recorder_t g_rec[MAX_REC];
+
+#define MAX_LISTS 8192
+static struct { uint64_t handle; rlist_t list; } g_lists[MAX_LISTS];
+static int g_nlists;
+
+static recorder_t *rec_of(uint64_t cmdbuf, int create)
+{
+    for (int i = 0; i < MAX_REC; ++i)
+        if (g_rec[i].cmdbuf == cmdbuf)
+            return &g_rec[i];
+    if (!create)
+        return NULL;
+    for (int i = 0; i < MAX_REC; ++i)
+        if (!g_rec[i].cmdbuf) {
+            g_rec[i].cmdbuf = cmdbuf;
+            return &g_rec[i];
+        }
+    return NULL;
+}
+
+static void rec_push(uint64_t cmdbuf, const rop_t *op)
+{
+    pthread_mutex_lock(&g_rlock);
+    recorder_t *r = rec_of(cmdbuf, 1);
+    if (r) {
+        if (r->cur.n == r->cur.cap) {
+            r->cur.cap = r->cur.cap ? r->cur.cap * 2 : 64;
+            r->cur.ops = realloc(r->cur.ops, sizeof(rop_t) * (size_t)r->cur.cap);
+        }
+        r->cur.ops[r->cur.n++] = *op;
+    }
+    pthread_mutex_unlock(&g_rlock);
+}
+
+static void cmd_BeginRecording(cpu_t *c)
+{
+    static int logged;
+    if (getenv("RECOMP_NVN_TRACE") && logged < 30 && ++logged)
+        host_log("render: begin recording 0x%llx (thread 0x%x)", (unsigned long long)A(0), kernel_current_thread()->handle);
+    pthread_mutex_lock(&g_rlock);
+    recorder_t *r = rec_of(A(0), 1);
+    if (r)
+        r->cur.n = 0;
+    pthread_mutex_unlock(&g_rlock);
+}
+
+static uint64_t g_cmd_handle = 0x100000;
+static void cmd_EndRecording(cpu_t *c)
+{
+    uint64_t h = __atomic_add_fetch(&g_cmd_handle, 1, __ATOMIC_RELAXED);
+    pthread_mutex_lock(&g_rlock);
+    recorder_t *r = rec_of(A(0), 0);
+    int slot = (int)(h % MAX_LISTS);
+    rlist_t *l = &g_lists[slot].list;
+    g_lists[slot].handle = h;
+    l->n = 0;
+    if (r && r->cur.n) {
+        if (l->cap < r->cur.n) {
+            l->cap = r->cur.n;
+            l->ops = realloc(l->ops, sizeof(rop_t) * (size_t)l->cap);
+        }
+        memcpy(l->ops, r->cur.ops, sizeof(rop_t) * (size_t)r->cur.n);
+        l->n = r->cur.n;
+        r->cur.n = 0;
+    }
+    if (g_nlists < MAX_LISTS) ++g_nlists;
+    pthread_mutex_unlock(&g_rlock);
+    RET(h);
+}
+
+// (cmdbuf, int numColors, const NVNtexture* const* colors, const NVNtextureView* const* views,
+//  const NVNtexture* depth, const NVNtextureView* depthView)
+static void cmd_SetRenderTargets(cpu_t *c)
+{
+    rop_t op = { OP_RT, { 0 }, { 0 } };
+    int   n  = (int)A(1);
+    if (n > 8) n = 8;
+    op.a[0] = (uint64_t)n;
+    for (int i = 0; i < n; ++i)
+        op.a[1 + i] = A(2) ? rd64(A(2) + 8ull * i) : 0;
+    rec_push(A(0), &op);
+}
+
+static void cmd_ClearColor(cpu_t *c) // (cmdbuf, int index, const float* color, int mask)
+{
+    rop_t op = { OP_CLEAR, { A(1), A(3) }, { 0 } };
+    if (A(2))
+        for (int i = 0; i < 4; ++i) {
+            uint32_t b = rd32(A(2) + 4ull * i);
+            memcpy(&op.f[i], &b, 4);
+        }
+    rec_push(A(0), &op);
+}
+
+static void cmd_CallCommands(cpu_t *c) // (cmdbuf, int count, const NVNcommandHandle* handles)
+{
+    for (uint64_t i = 0; i < A(1); ++i) {
+        rop_t op = { OP_CALL, { rd64(A(2) + 8 * i) }, { 0 } };
+        rec_push(A(0), &op);
+    }
+}
+
+static void cmd_Draw(cpu_t *c)
+{
+    rop_t op = { OP_DRAW, { 0 }, { 0 } };
+    rec_push(A(0), &op);
+}
+
+static uint64_t g_targets[8]; // currently bound color targets (queue state)
+static uint64_t g_draws_this_frame;
+
+static uint8_t to_u8(float v) { return v <= 0 ? 0 : v >= 1 ? 255 : (uint8_t)(v * 255.0f + 0.5f); }
+
+static void run_list(uint64_t handle, int depth)
+{
+    if (depth > 8)
+        return;
+    rlist_t *l = &g_lists[handle % MAX_LISTS].list;
+    if (g_lists[handle % MAX_LISTS].handle != handle)
+        return;
+    for (int i = 0; i < l->n; ++i) {
+        rop_t *op = &l->ops[i];
+        switch (op->op) {
+        case OP_RT:
+            memset(g_targets, 0, sizeof g_targets);
+            for (uint64_t k = 0; k < op->a[0]; ++k) g_targets[k] = op->a[1 + k];
+            break;
+        case OP_CLEAR: {
+            static int logged;
+            if (logged < 40 && ++logged)
+                host_log("render: clear target[%llu] = 0x%llx to (%.3f %.3f %.3f %.3f) mask 0x%llx",
+                         (unsigned long long)op->a[0], (unsigned long long)g_targets[op->a[0] & 7], op->f[0],
+                         op->f[1], op->f[2], op->f[3], (unsigned long long)op->a[1]);
+            shadow_t *s = shadow_of(g_targets[op->a[0] & 7]);
+            if (!s) break;
+            uint32_t mask = (uint32_t)op->a[1];
+            uint32_t v = (uint32_t)to_u8(op->f[0]) | (uint32_t)to_u8(op->f[1]) << 8 |
+                         (uint32_t)to_u8(op->f[2]) << 16 | (uint32_t)to_u8(op->f[3]) << 24;
+            uint32_t keep = 0;
+            for (int ch = 0; ch < 4; ++ch)
+                if (!(mask & (1u << ch))) keep |= 0xFFu << (8 * ch);
+            for (size_t p = 0; p < (size_t)s->w * s->h; ++p)
+                s->px[p] = (s->px[p] & keep) | (v & ~keep);
+            break;
+        }
+        case OP_CALL: run_list(op->a[0], depth + 1); break;
+        case OP_DRAW: ++g_draws_this_frame; break;
+        }
+    }
+}
+
+static void queue_SubmitCommands(cpu_t *c) // (queue, int count, const NVNcommandHandle* handles)
+{
+    pthread_mutex_lock(&g_rlock);
+    static int logged;
+    if (getenv("RECOMP_NVN_TRACE") && logged < 6 && ++logged)
+        for (uint64_t i = 0; i < A(1); ++i) {
+            uint64_t h = rd64(A(2) + 8 * i);
+            rlist_t *l = &g_lists[h % MAX_LISTS].list;
+            host_log("render: submit queue 0x%llx handle 0x%llx: %d ops (slot owner 0x%llx)", (unsigned long long)A(0),
+                     (unsigned long long)h, l->n, (unsigned long long)g_lists[h % MAX_LISTS].handle);
+            for (int k = 0; k < l->n && k < 40; ++k)
+                host_log("    op %d a0 0x%llx", l->ops[k].op, (unsigned long long)l->ops[k].a[0]);
+        }
+    for (uint64_t i = 0; i < A(1); ++i)
+        run_list(rd64(A(2) + 8 * i), 0);
+    pthread_mutex_unlock(&g_rlock);
+}
+
 static void queue_Present(cpu_t *c) // (queue, window, int index)
 {
     static uint64_t frames;
     ++frames;
+    uint64_t arr = prop_get(A(1), "Textures", 1);
+    uint64_t tex = arr ? rd64(arr + 8 * (A(2) & 7)) : 0;
+    pthread_mutex_lock(&g_rlock);
+    shadow_t *s = shadow_of(tex);
     if (frames == 1 || frames % 60 == 0)
-        host_log("nvn: present #%llu (window texture %d)", (unsigned long long)frames, (int)A(2));
+        host_log("nvn: present #%llu (window texture %d, %llu draws since last log)", (unsigned long long)frames,
+                 (int)A(2), (unsigned long long)g_draws_this_frame);
+    if (frames % 60 == 0)
+        g_draws_this_frame = 0;
+    if (s)
+        present_frame(s->px, s->w, s->h, frames);
+    pthread_mutex_unlock(&g_rlock);
+    if (frames == 120)
+        hle_dump_stats(150);
+    if (frames % 300 == 0) {
+        void exec_dump_profile(int top);
+        exec_dump_profile(40);
+    }
     RET(0);
 }
 
@@ -307,6 +629,19 @@ static const impl_t k_impl[] = {
     { "nvnTextureBuilderSetSize2D", tex_builder_SetSize2D },
     { "nvnTextureBuilderSetSize3D", tex_builder_SetSize3D },
     { "nvnTextureBuilderSetLevels", tex_builder_SetLevels },
+    { "nvnTextureBuilderSetWidth", tex_builder_SetWidth },
+    { "nvnTextureBuilderSetHeight", tex_builder_SetHeight },
+    { "nvnTextureBuilderSetDepth", tex_builder_SetDepth },
+    { "nvnCommandBufferBeginRecording", cmd_BeginRecording },
+    { "nvnCommandBufferSetRenderTargets", cmd_SetRenderTargets },
+    { "nvnCommandBufferClearColor", cmd_ClearColor },
+    { "nvnCommandBufferCallCommands", cmd_CallCommands },
+    { "nvnCommandBufferDrawElements", cmd_Draw },
+    { "nvnCommandBufferDrawElementsBaseVertex", cmd_Draw },
+    { "nvnCommandBufferDrawElementsInstanced", cmd_Draw },
+    { "nvnCommandBufferDrawArrays", cmd_Draw },
+    { "nvnCommandBufferDrawArraysInstanced", cmd_Draw },
+    { "nvnQueueSubmitCommands", queue_SubmitCommands },
     { "nvnTextureBuilderGetStorageSize", tex_builder_GetStorageSize },
     { "nvnTextureBuilderGetStorageAlignment", tex_builder_GetStorageAlignment },
     { "nvnTextureBuilderSetStorage", tex_builder_SetStorage },

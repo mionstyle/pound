@@ -137,6 +137,25 @@ bool hle_try(cpu_t *c, uint64_t target)
     return true;
 }
 
+static int calls_cmp(const void *a, const void *b)
+{
+    uint64_t x = (*(hle_entry_t *const *)a)->calls, y = (*(hle_entry_t *const *)b)->calls;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+// Logs the most called replaced functions (used to see what a frame does).
+void hle_dump_stats(int top)
+{
+    static hle_entry_t *v[MAX_HLE];
+    int n = 0;
+    for (int i = 0; i < g_hle_count; ++i)
+        if (g_hle[i].calls) v[n++] = &g_hle[i];
+    qsort(v, (size_t)n, sizeof *v, calls_cmp);
+    host_log("hle: %d functions called; most called:", n);
+    for (int i = 0; i < n && i < top; ++i)
+        host_log("  %10llu  %s", (unsigned long long)v[i]->calls, v[i]->name);
+}
+
 bool hle_is_hooked(uint64_t addr) { return find(addr) != NULL; }
 
 int hle_addresses(uint64_t *out, int max)
@@ -173,6 +192,7 @@ extern const hle_def_t hle_defs_graphics[];
 extern const hle_def_t hle_defs_vi[];
 extern const hle_def_t hle_defs_audio[];
 extern const hle_def_t hle_defs_hid[];
+extern const hle_def_t hle_defs_libc[];
 
 static void register_defs(const hle_def_t *defs)
 {
@@ -200,5 +220,6 @@ void hle_init(void)
     register_defs(hle_defs_vi);
     register_defs(hle_defs_audio);
     register_defs(hle_defs_hid);
+    register_defs(hle_defs_libc);
     host_log("hle: %d module symbols, %d functions replaced", g_nsyms, g_hle_count);
 }

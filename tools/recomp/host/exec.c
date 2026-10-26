@@ -2,6 +2,7 @@
 // function start of a module, otherwise to the Unicorn fallback interpreter,
 // which shares guest memory with the recompiled code.
 
+#include <time.h>
 #include "hle.h"
 #include <pthread.h>
 #include <stdio.h>
@@ -17,10 +18,18 @@ uint64_t g_stats_interp_calls;
 // Interpreter engines: a small stack per host thread (Unicorn engines are not thread-safe
 // and not re-entrant). A host function called from inside the interpreter (HLE, SVC) may
 // call guest code again, which then runs on the next engine of the stack.
-#define MAX_DEPTH 8
+#define MAX_DEPTH 160
 static __thread uc_engine *g_ucs[MAX_DEPTH];
 static __thread cpu_t     *g_cpus[MAX_DEPTH];
 static __thread int        g_depth;
+static __thread uint64_t   g_until[MAX_DEPTH];
+
+// Unicorn runs its CPU single-threaded, so the atomics and exclusive accesses it emulates
+// are not atomic with respect to other host threads. Interpreted code therefore runs
+// under one global lock, released whenever it calls out (SVC, HLE, compiled code).
+static pthread_mutex_t g_interp_lock = PTHREAD_MUTEX_INITIALIZER;
+#define INTERP_UNLOCK() pthread_mutex_unlock(&g_interp_lock)
+#define INTERP_LOCK()   pthread_mutex_lock(&g_interp_lock) // address where the current emulation run ends
 #define uc     (g_ucs[g_depth - 1])
 #define uc_cpu (g_cpus[g_depth - 1])
 
@@ -30,7 +39,7 @@ typedef struct { uint64_t addr, size; } map_t;
 static map_t           g_maps[4096];
 static int             g_map_count;
 static pthread_mutex_t g_maps_lock = PTHREAD_MUTEX_INITIALIZER;
-static uc_engine      *new_engine(void);
+static uc_engine      *new_engine(int depth);
 
 static const int xregs[31] = {
     UC_ARM64_REG_X0,  UC_ARM64_REG_X1,  UC_ARM64_REG_X2,  UC_ARM64_REG_X3,  UC_ARM64_REG_X4,  UC_ARM64_REG_X5,
@@ -88,7 +97,9 @@ static void on_interrupt(uc_engine *u, uint32_t intno, void *ud)
     }
     from_uc(uc_cpu);
     uc_cpu->pc = pc - 4;
+    INTERP_UNLOCK();
     kernel_svc(uc_cpu, (insn >> 5) & 0xFFFF);
+    INTERP_LOCK();
     to_uc(uc_cpu);
 }
 
@@ -120,23 +131,89 @@ static void on_hle_code(uc_engine *u, uint64_t addr, uint32_t size, void *ud)
         return;
     from_uc(uc_cpu);
     uc_cpu->pc = addr;
+    INTERP_UNLOCK();
     hle_try(uc_cpu, addr);
+    INTERP_LOCK();
     to_uc(uc_cpu);
     uint64_t lr = uc_cpu->x[30];
     uc_reg_write(u, UC_ARM64_REG_PC, &lr);
+    if (lr == g_until[g_depth - 1])
+        uc_emu_stop(u);
 }
 
-static uc_engine *new_engine(void)
+static recomp_fn_t lookup(const module_t *m, uint64_t off);
+
+// A basic block that starts a compiled function, reached inside the interpreter (a call or
+// tail call from interpreted code): run the compiled version instead and return to LR.
+// This keeps the interpreter confined to the functions that really need it.
+static void on_block(uc_engine *u, uint64_t addr, uint32_t size, void *ud)
+{
+    (void)size; (void)ud;
+    if (hle_is_hooked(addr))
+        return; // replaced function: its code hook runs the host version
+    for (int i = 0; i < g_module_count; ++i) {
+        const module_t *m = &g_modules[i];
+        if (addr < m->base || addr >= m->base + m->size)
+            continue;
+        static const char *only = (const char *)1;
+        if (only == (const char *)1) only = getenv("RECOMP_BLOCK_ONLY");
+        if (only && strcmp(only, m->name))
+            return;
+        recomp_fn_t fn = lookup(m, addr - m->base);
+        if (!fn)
+            return;
+        // Bisection aid: RECOMP_BLOCK_MOD=m:r dispatches only entries with (addr/4) % m == r,
+        // RECOMP_BLOCK_LOG logs each newly dispatched entry once.
+        static int mod = -1, rem;
+        if (mod < 0) {
+            const char *e = getenv("RECOMP_BLOCK_MOD");
+            mod = 0;
+            if (e) sscanf(e, "%d:%d", &mod, &rem);
+        }
+        if (mod > 0 && (int)((addr >> 2) % (uint64_t)mod) != rem)
+            return;
+        if (getenv("RECOMP_BLOCK_LOG")) {
+            static uint64_t seen[65536];
+            uint32_t h = (uint32_t)((addr >> 2) * 2654435761u) & 65535;
+            if (seen[h] != addr) { seen[h] = addr; host_log("block-dispatch %s", addr_describe(addr)); }
+        }
+        cpu_t *c = uc_cpu;
+        from_uc(c);
+        ++g_stats_compiled_calls;
+        INTERP_UNLOCK();
+        fn(c);
+        INTERP_LOCK();
+        to_uc(c);
+        uint64_t lr = c->x[30];
+        uc_reg_write(u, UC_ARM64_REG_PC, &lr);
+        // Unicorn only checks the end address when it starts a block, not after a hook
+        // moved PC: returning straight to it must stop the run explicitly.
+        if (lr == g_until[g_depth - 1])
+            uc_emu_stop(u);
+        return;
+    }
+}
+
+static uc_engine *new_engine(int depth)
 {
     uc_engine *e;
     if (uc_open(UC_ARCH_ARM64, UC_MODE_ARM, &e) != UC_ERR_OK)
         host_fatal("uc_open failed");
+    // Deeply nested engines (interpreted <-> compiled recursion) run little code each.
+    uc_ctl_set_tcg_buffer_size(e, depth < 2 ? 128u << 20 : 8u << 20);
     uc_ctl_set_cpu_model(e, UC_CPU_ARM64_MAX);
     uc_hook h1, h2;
     uc_hook_add(e, &h1, UC_HOOK_INTR, (void *)on_interrupt, NULL, 1, 0);
     uc_hook_add(e, &h2, UC_HOOK_MEM_INVALID, (void *)on_invalid, NULL, 1, 0);
     uc_hook h3;
     uc_hook_add(e, &h3, UC_HOOK_CODE, (void *)on_hle_code, NULL, HLE_THUNK_BASE, HLE_THUNK_BASE + HLE_THUNK_SIZE - 1);
+    if (!getenv("RECOMP_NO_BLOCK_DISPATCH") && g_module_count) {
+        uc_hook hb;
+        uint64_t lo = g_modules[0].base, hi = 0;
+        for (int i = 0; i < g_module_count; ++i)
+            if (g_modules[i].base + g_modules[i].size > hi) hi = g_modules[i].base + g_modules[i].size;
+        uc_hook_add(e, &hb, UC_HOOK_BLOCK, (void *)on_block, NULL, lo, hi - 1);
+    }
     static uint64_t hooked[4096];
     int             n = hle_addresses(hooked, 4096);
     for (int i = 0; i < n; ++i) {
@@ -153,10 +230,14 @@ static uc_engine *new_engine(void)
 // Pushes an engine for an interpreted call on cpu c.
 static void enter(cpu_t *c)
 {
-    if (g_depth >= MAX_DEPTH)
+    if (g_depth >= MAX_DEPTH) {
+        for (int i = MAX_DEPTH - 6; i < MAX_DEPTH; ++i)
+            host_log("  depth %d: until %s", i, addr_describe(g_until[i]));
+        guest_backtrace(c);
         host_fatal("interpreter nesting too deep");
+    }
     if (!g_ucs[g_depth])
-        g_ucs[g_depth] = new_engine();
+        g_ucs[g_depth] = new_engine(g_depth);
     g_cpus[g_depth] = c;
     ++g_depth;
 }
@@ -189,16 +270,72 @@ void exec_unmap_region(uint64_t addr, uint64_t size)
             uc_mem_unmap(g_ucs[i], addr, size);
 }
 
+// ---- interpreter profile: where the time spent outside compiled code goes -------------
+
+#define PROF_SLOTS 16384
+static struct { uint64_t addr, count, ns; } g_prof[PROF_SLOTS];
+static pthread_mutex_t g_prof_lock = PTHREAD_MUTEX_INITIALIZER;
+static int             g_prof_on = -1;
+
+static uint64_t now_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+static void prof_add(uint64_t addr, uint64_t ns)
+{
+    pthread_mutex_lock(&g_prof_lock);
+    uint32_t h = (uint32_t)((addr >> 2) * 2654435761u) % PROF_SLOTS;
+    for (int k = 0; k < PROF_SLOTS; ++k, h = (h + 1) % PROF_SLOTS)
+        if (g_prof[h].addr == addr || !g_prof[h].addr) {
+            g_prof[h].addr = addr;
+            ++g_prof[h].count;
+            g_prof[h].ns += ns;
+            break;
+        }
+    pthread_mutex_unlock(&g_prof_lock);
+}
+
+static int prof_cmp(const void *a, const void *b)
+{
+    uint64_t x = ((const uint64_t *)a)[2], y = ((const uint64_t *)b)[2];
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+void exec_dump_profile(int top)
+{
+    if (g_prof_on != 1)
+        return;
+    pthread_mutex_lock(&g_prof_lock);
+    static uint64_t v[PROF_SLOTS][3];
+    int n = 0;
+    for (int i = 0; i < PROF_SLOTS; ++i)
+        if (g_prof[i].addr) { v[n][0] = g_prof[i].addr; v[n][1] = g_prof[i].count; v[n][2] = g_prof[i].ns; ++n; }
+    pthread_mutex_unlock(&g_prof_lock);
+    qsort(v, (size_t)n, sizeof v[0], prof_cmp);
+    host_log("profile: interpreter entry points by time (inclusive):");
+    for (int i = 0; i < n && i < top; ++i)
+        host_log("  %8.1f ms %9llu calls  %s", v[i][2] / 1e6, (unsigned long long)v[i][1], addr_describe(v[i][0]));
+}
+
 static void interp_call(cpu_t *c, uint64_t target)
 {
+    if (g_prof_on < 0)
+        g_prof_on = getenv("RECOMP_PROFILE") != NULL;
+    uint64_t t0 = g_prof_on ? now_ns() : 0;
     enter(c);
     ++g_stats_interp_calls;
     if (host_verbose > 1)
         host_log("interp  -> %s", addr_describe(target));
     uint64_t lr   = c->x[30];
     c->x[30]      = INTERP_RETURN_MAGIC;
+    g_until[g_depth - 1] = INTERP_RETURN_MAGIC;
     to_uc(c);
+    INTERP_LOCK();
     uc_err e = uc_emu_start(uc, target, INTERP_RETURN_MAGIC, 0, 0);
+    INTERP_UNLOCK();
     from_uc(c);
     uint64_t pc;
     uc_reg_read(uc, UC_ARM64_REG_PC, &pc);
@@ -212,22 +349,30 @@ static void interp_call(cpu_t *c, uint64_t target)
     }
     c->x[30] = lr;
     leave();
+    if (g_prof_on)
+        prof_add(target, now_ns() - t0);
 }
 
 void recomp_resume(cpu_t *c, uint64_t pc, uint64_t lr)
 {
+    uint64_t t0 = g_prof_on == 1 ? now_ns() : 0;
     enter(c);
     ++g_stats_interp_calls;
     if (host_verbose > 1)
         host_log("resume  -> %s (until %s)", addr_describe(pc), addr_describe(lr));
+    g_until[g_depth - 1] = lr;
     to_uc(c);
+    INTERP_LOCK();
     uc_err e = uc_emu_start(uc, pc, lr, 0, 0);
+    INTERP_UNLOCK();
     from_uc(c);
     uint64_t end;
     uc_reg_read(uc, UC_ARM64_REG_PC, &end);
     if (e != UC_ERR_OK || end != lr)
         host_fatal("interpreter (resume) stopped at %s: %s", addr_describe(end), uc_strerror(e));
     leave();
+    if (g_prof_on == 1)
+        prof_add(pc | 1, now_ns() - t0); // odd address marks a resume point
 }
 
 uint64_t guest_call(cpu_t *c, uint64_t fn, int nargs, const uint64_t *args)
