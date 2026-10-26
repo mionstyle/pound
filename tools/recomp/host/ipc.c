@@ -288,6 +288,9 @@ static const struct { const char *iface; uint32_t cmd; const char *ret; } k_retu
     { "am:IApplicationProxy", 11, "am:ILibraryAppletCreator" },
     { "am:IApplicationProxy", 20, "am:IApplicationFunctions" },
     { "am:IApplicationProxy", 1000, "am:IDebugFunctions" },
+    // Switch 2 additions to the proxy (names guessed from the SDK getters that use them).
+    { "am:IApplicationProxy", 40, "am:IApplicationProxy.40" },
+    { "am:IApplicationProxy", 60, "am:IApplicationProxy.60" },
     { "hid", 0, "hid:IAppletResource" },
     { "time:u", 0, "time:ISystemClock(user)" },
     { "time:u", 1, "time:ISystemClock(network)" },
@@ -302,6 +305,15 @@ static const struct { const char *iface; uint32_t cmd; const char *ret; } k_retu
     { "pctl:a", 1, "pctl:IParentalControlService" },
     { "pctl:r", 0, "pctl:IParentalControlService" },
     { "pctl:r", 1, "pctl:IParentalControlService" },
+    { "nifm:u", 4, "nifm:IGeneralService" },  // CreateGeneralServiceOld
+    { "nifm:u", 5, "nifm:IGeneralService" },  // CreateGeneralService
+    { "bcat:u", 0, "bcat:IBcatService" },     // CreateBcatService
+};
+
+// Commands that fail with a fixed result, mirroring an offline console with no content.
+static const struct { const char *iface; uint32_t cmd; uint32_t result; const char *why; } k_failures[] = {
+    // CreateDeliveryCacheStorageService: no BCAT delivery cache was ever downloaded.
+    { "bcat:u", 1, 0x67a, "no delivery cache" },
 };
 
 // Commands known to return a (copy) handle to an event: (interface, command, initially signalled).
@@ -478,6 +490,14 @@ static void handle_request(request_t *q, reply_t *r)
             return;
         }
     }
+    if (!strcmp(q->iface, "am:IApplicationProxy.60") && q->cmd == 10) {
+        // Read by nn::oe::GetGraphicsScalingParameters. The first word is the scaling mode:
+        // nn::oe::GetCurrentGraphicsScale maps 10/20/30 to scale 0/1/2 and aborts otherwise.
+        static const uint32_t params[3] = { 10, 0, 0 };
+        r->data_size = sizeof params;
+        memcpy(r->data, params, sizeof params);
+        return;
+    }
     if (!strcmp(q->iface, "am:IWindowController") && q->cmd == 1) { // GetAppletResourceUserId
         reply_u64(r, APPLET_RESOURCE_USER_ID);
         return;
@@ -489,6 +509,12 @@ static void handle_request(request_t *q, reply_t *r)
         host_log("ipc: am:ISelfController cmd 2000 (GetGraphicsSupervisor) -> session");
         return;
     }
+    for (size_t i = 0; i < sizeof k_failures / sizeof k_failures[0]; ++i)
+        if (!strcmp(k_failures[i].iface, q->iface) && k_failures[i].cmd == q->cmd) {
+            host_log("ipc: %s cmd %u -> 0x%x (%s)", q->iface, q->cmd, k_failures[i].result, k_failures[i].why);
+            r->result = k_failures[i].result;
+            return;
+        }
     for (size_t i = 0; i < sizeof k_events / sizeof k_events[0]; ++i)
         if (!strcmp(k_events[i].iface, q->iface) && k_events[i].cmd == q->cmd && strcmp(q->iface, "time:u")) {
             r->copy[r->num_copy++] = kernel_new_event(k_events[i].signaled, NULL);

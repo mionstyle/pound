@@ -101,7 +101,57 @@ typedef struct { const char *name; hle_fn_t fn; } impl_t;
 static void dev_GetInteger(cpu_t *c) // (device, NVNdeviceInfo pname, int* value)
 {
     uint32_t pname = (uint32_t)A(1);
-    int32_t  v     = 0;
+    // Values follow the NVN (Switch 1) NVNdeviceInfo order, which NVN2 appears to keep for
+    // the low ids. 0/1 are checked by DKB at boot: major must be 231 (0xE7), minor >= 30.
+    static const int32_t k_info[] = {
+        231,     // 0  API_MAJOR_VERSION
+        30,      // 1  API_MINOR_VERSION
+        14,      // 2  UNIFORM_BUFFER_BINDINGS_PER_STAGE
+        65536,   // 3  MAX_UNIFORM_BUFFER_SIZE
+        256,     // 4  UNIFORM_BUFFER_ALIGNMENT
+        8,       // 5  COLOR_BUFFER_BINDINGS
+        16,      // 6  VERTEX_BUFFER_BINDINGS
+        4,       // 7  TRANSFORM_FEEDBACK_BUFFER_BINDINGS
+        16,      // 8  SHADER_STORAGE_BUFFER_BINDINGS_PER_STAGE
+        32,      // 9  TEXTURE_BINDINGS_PER_STAGE
+        16,      // 10 COUNTER_ALIGNMENT
+        4,       // 11 TRANSFORM_FEEDBACK_BUFFER_ALIGNMENT
+        4,       // 12 TRANSFORM_FEEDBACK_CONTROL_ALIGNMENT
+        4,       // 13 INDIRECT_DRAW_ALIGNMENT
+        16,      // 14 VERTEX_ATTRIBUTES
+        32,      // 15 TEXTURE_DESCRIPTOR_SIZE
+        32,      // 16 SAMPLER_DESCRIPTOR_SIZE
+        256,     // 17 RESERVED_TEXTURE_DESCRIPTORS
+        256,     // 18 RESERVED_SAMPLER_DESCRIPTORS
+        4,       // 19 COMMAND_BUFFER_COMMAND_ALIGNMENT
+        8,       // 20 COMMAND_BUFFER_CONTROL_ALIGNMENT
+        4096,    // 21 COMMAND_BUFFER_MIN_COMMAND_SIZE
+        1024,    // 22 COMMAND_BUFFER_MIN_CONTROL_SIZE
+        128,     // 23 SHADER_SCRATCH_MEMORY_SCALE_FACTOR_MINIMUM
+        256,     // 24 SHADER_SCRATCH_MEMORY_SCALE_FACTOR_RECOMMENDED
+        4096,    // 25 SHADER_SCRATCH_MEMORY_ALIGNMENT
+        0x20000, // 26 SHADER_SCRATCH_MEMORY_GRANULARITY
+        16,      // 27 MAX_TEXTURE_ANISOTROPY
+        1536,    // 28 MAX_COMPUTE_WORK_GROUP_SIZE_X
+        1024,    // 29 MAX_COMPUTE_WORK_GROUP_SIZE_Y
+        64,      // 30 MAX_COMPUTE_WORK_GROUP_SIZE_Z
+        1536,    // 31 MAX_COMPUTE_WORK_GROUP_SIZE_THREADS
+        65535,   // 32 MAX_COMPUTE_DISPATCH_WORK_GROUPS_X
+        65535,   // 33 MAX_COMPUTE_DISPATCH_WORK_GROUPS_Y
+        65535,   // 34 MAX_COMPUTE_DISPATCH_WORK_GROUPS_Z
+        8,       // 35 IMAGE_BINDINGS_PER_STAGE
+        1048576, // 36 MAX_TEXTURE_POOL_SIZE
+        4096,    // 37 MAX_SAMPLER_POOL_SIZE
+        16,      // 38 MAX_VIEWPORTS
+        4096,    // 39 MEMPOOL_TEXTURE_OBJECT_PAGE_ALIGNMENT
+        1,       // 40 SUPPORTS_MIN_MAX_FILTERING
+        1,       // 41 SUPPORTS_STENCIL8_FORMAT
+        1,       // 42 SUPPORTS_ASTC_FORMATS
+        0x400000,// 43 L2_SIZE
+        15,      // 44 MAX_TEXTURE_LEVELS
+        2048,    // 45 MAX_TEXTURE_LAYERS
+    };
+    int32_t v = pname < sizeof k_info / sizeof k_info[0] ? k_info[pname] : 0;
     // Values are filled in as the game's needs become known (logged once per pname).
     static uint8_t seen[1024];
     if (pname < 1024 && !seen[pname]++)

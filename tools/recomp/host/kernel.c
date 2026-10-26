@@ -679,7 +679,7 @@ static void kernel_svc_locked(cpu_t *c, uint32_t imm)
     case 0x26: { // Break(reason, info_addr, info_size)
         host_log("Break(reason 0x%x, 0x%llx, 0x%llx) from %s", W(0), (unsigned long long)X(1),
                  (unsigned long long)X(2), addr_describe(c->pc));
-        if (X(2) == 4)
+        if (X(2) == 4 && X(1))
             host_log("  result code 0x%x", rd32(X(1)));
         const char *watch = getenv("RECOMP_WATCH"); // comma separated module offsets, e.g. main+0x26d50f8
         while (watch && *watch) {
