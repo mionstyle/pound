@@ -7,6 +7,7 @@
 // interface create a new object of that interface.
 
 #include "host.h"
+#include "savefs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,8 @@ typedef struct
 {
     char iface[48];
     int  in_use;
+    char path[0x302]; // fsp IFile / IDirectory: guest path of the opened entry
+    int  dir_pos;     // IDirectory: entries already returned
 } object_t;
 
 #define MAX_OBJECTS 1024
@@ -252,7 +255,7 @@ static void reply_u32(reply_t *r, uint32_t v) { memcpy(r->data + r->data_size, &
 static void reply_u64(reply_t *r, uint64_t v) { r->data_size = (r->data_size + 7) & ~7u; memcpy(r->data + r->data_size, &v, 8); r->data_size += 8; }
 
 // Returns a new object of `iface` to the client (as a handle, or a domain object id).
-static void reply_object(request_t *q, reply_t *r, const char *iface)
+static int reply_object(request_t *q, reply_t *r, const char *iface)
 {
     int obj = object_new(iface);
     if (q->domain) {
@@ -261,11 +264,100 @@ static void reply_object(request_t *q, reply_t *r, const char *iface)
             if (!s->domain[i]) {
                 s->domain[i] = obj;
                 r->out_objects[r->num_out_objects++] = (uint32_t)i;
-                return;
+                return obj;
             }
         host_fatal("domain full");
     }
     r->move[r->num_move++] = session_new(obj, 0)->handle;
+    return obj;
+}
+
+// ---- save data file system (host directory, see savefs.c) ----------------------------
+
+static void x_path(const request_t *q, int i, char *out)
+{
+    memset(out, 0, 0x302);
+    if (i < (int)q->msg->num_x && q->msg->x_addr[i])
+        g_read(q->msg->x_addr[i], out, q->msg->x_size[i] < 0x301 ? q->msg->x_size[i] : 0x301);
+}
+
+static int handle_savefs(request_t *q, reply_t *r)
+{
+    char path[0x302], path2[0x302];
+    if (!strcmp(q->iface, "fsp:IFileSystem(savedata)")) {
+        x_path(q, 0, path);
+        switch (q->cmd) {
+        case 0: r->result = savefs_create_file(path, rd64(q->in + 8)); break; // (u32 option, u64 size)
+        case 1: r->result = savefs_delete_file(path); break;
+        case 2: r->result = savefs_create_dir(path); break;
+        case 3: r->result = savefs_delete_dir(path, 0, 0); break;
+        case 4: r->result = savefs_delete_dir(path, 1, 0); break;
+        case 5: case 6: x_path(q, 1, path2); r->result = savefs_rename(path, path2); break;
+        case 7: { // GetEntryType
+            int t = savefs_entry_type(path);
+            if (t < 0) r->result = FS_RESULT_NOT_FOUND;
+            else reply_u32(r, (uint32_t)t);
+            break;
+        }
+        case 8: case 9: { // OpenFile(u32 mode) / OpenDirectory(u32 mode)
+            int t = savefs_entry_type(path);
+            if (t != (q->cmd == 8 ? 1 : 0)) { r->result = FS_RESULT_NOT_FOUND; break; }
+            int obj = reply_object(q, r, q->cmd == 8 ? "fsp:IFile(savedata)" : "fsp:IDirectory(savedata)");
+            memcpy(objects[obj].path, path, sizeof path);
+            objects[obj].dir_pos = 0;
+            break;
+        }
+        case 10: break; // Commit
+        case 11: case 12: reply_u64(r, 512ull << 20); break; // Get{Free,Total}SpaceSize
+        case 13: r->result = savefs_delete_dir(path, 1, 1); break; // CleanDirectoryRecursively
+        default: return 0;
+        }
+        if (host_verbose)
+            host_log("ipc: savedata cmd %u '%s' -> 0x%x", q->cmd, path, r->result);
+        return 1;
+    }
+    object_t *o = &objects[q->object];
+    if (!strcmp(q->iface, "fsp:IFile(savedata)")) {
+        switch (q->cmd) {
+        case 0: { // Read(u32 option, u64 offset, u64 size) -> u64 read, B buffer
+            uint64_t off = rd64(q->in + 8), size = rd64(q->in + 16), cap = 0, done = 0;
+            uint64_t dst = out_buf(q->msg, 0, &cap);
+            if (size > cap) size = cap;
+            r->result = savefs_read(o->path, off, mem_host(dst), size, &done);
+            reply_u64(r, done);
+            return 1;
+        }
+        case 1: { // Write(u32 option, u64 offset, u64 size), A buffer
+            uint64_t off = rd64(q->in + 8), size = rd64(q->in + 16);
+            if (q->msg->num_a && size > q->msg->a_size[0]) size = q->msg->a_size[0];
+            r->result = savefs_write(o->path, off, mem_host(q->msg->a_addr[0]), size);
+            return 1;
+        }
+        case 2: return 1; // Flush
+        case 3: r->result = savefs_set_size(o->path, rd64(q->in)); return 1;
+        case 4: reply_u64(r, savefs_size(o->path)); return 1;
+        }
+        return 0;
+    }
+    if (!strcmp(q->iface, "fsp:IDirectory(savedata)")) {
+        static savefs_entry_t e[256];
+        int n = savefs_list(o->path, e, 256);
+        if (q->cmd == 1) { reply_u64(r, (uint64_t)(n > o->dir_pos ? n - o->dir_pos : 0)); return 1; }
+        if (q->cmd == 0) { // Read -> s64 count, B buffer of 0x310-byte DirectoryEntry
+            uint64_t cap = 0, dst = out_buf(q->msg, 0, &cap), k = 0;
+            for (; o->dir_pos < n && (k + 1) * 0x310 <= cap; ++o->dir_pos, ++k) {
+                uint8_t ent[0x310] = {0};
+                memcpy(ent, e[o->dir_pos].name, strlen(e[o->dir_pos].name));
+                ent[0x304] = (uint8_t)e[o->dir_pos].is_file;
+                memcpy(ent + 0x308, &e[o->dir_pos].size, 8);
+                g_write(dst + k * 0x310, ent, 0x310);
+            }
+            reply_u64(r, k);
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
 }
 
 // Commands known to return an interface: (interface, command, returned interface).
@@ -312,7 +404,8 @@ static const struct { const char *iface; uint32_t cmd; const char *ret; } k_retu
     { "aud:IAudioRendererManager", 0, "aud:IAudioRenderer" }, // OpenAudioRenderer
     { "aud:IAudioRendererManager", 4, "aud:IAudioDevice" },   // GetAudioDeviceService(aruid)
     { "stpl:u", 0, "stpl:IStreamPlayService" },              // Switch 2 nn::streamplay (GameShare)
-    { "nfp:user", 0, "nfp:IUser" },                          // CreateUserInterface (amiibo)
+    { "nfp:user", 0, "nfp:IUser" },
+    { "nifm:IGeneralService", 4, "nifm:IRequest" },          // CreateRequest                          // CreateUserInterface (amiibo)
 };
 
 // Commands that fail with a fixed result, mirroring an offline console with no content.
@@ -344,6 +437,8 @@ static __thread uint64_t g_current_msg;
 
 static void handle_request(request_t *q, reply_t *r)
 {
+    if (handle_savefs(q, r))
+        return;
     // sm: is the only service with real behaviour so far.
     if (!strcmp(q->iface, "sm:")) {
         if (q->cmd == 0) return; // RegisterClient
@@ -512,6 +607,17 @@ static void handle_request(request_t *q, reply_t *r)
         // page-aligned size the SDK accepts will do.
         reply_u64(r, 0x10000);
         return;
+    }
+    if (!strcmp(q->iface, "nifm:IRequest")) {
+        // Offline console: requests never get a network connection.
+        switch (q->cmd) {
+        case 0: reply_u32(r, 1); return;          // GetRequestState: Invalid/not submitted
+        case 1: r->result = 0xE6E6E; return;      // GetResult: no network (nifm 110-3511)
+        case 2:                                   // GetSystemEventReadableHandles
+            r->copy[r->num_copy++] = kernel_new_event(0, NULL);
+            r->copy[r->num_copy++] = kernel_new_event(0, NULL);
+            return;
+        }
     }
     if (!strcmp(q->iface, "am:IWindowController") && q->cmd == 1) { // GetAppletResourceUserId
         reply_u64(r, APPLET_RESOURCE_USER_ID);

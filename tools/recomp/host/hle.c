@@ -172,6 +172,7 @@ uint64_t hle_alloc(uint64_t size, uint64_t align)
 extern const hle_def_t hle_defs_graphics[];
 extern const hle_def_t hle_defs_vi[];
 extern const hle_def_t hle_defs_audio[];
+extern const hle_def_t hle_defs_hid[];
 
 static void register_defs(const hle_def_t *defs)
 {
@@ -198,5 +199,6 @@ void hle_init(void)
     register_defs(hle_defs_graphics);
     register_defs(hle_defs_vi);
     register_defs(hle_defs_audio);
+    register_defs(hle_defs_hid);
     host_log("hle: %d module symbols, %d functions replaced", g_nsyms, g_hle_count);
 }
