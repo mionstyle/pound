@@ -104,6 +104,14 @@ uint32_t kernel_new_event(int signaled, void **out_event)
 
 void kernel_event_set(void *event, int signaled) { ((event_t *)event)->signaled = signaled; }
 
+void kernel_event_signal(void *event)
+{
+    pthread_mutex_lock(&K);
+    ((event_t *)event)->signaled = 1;
+    pthread_cond_broadcast(&KC);
+    pthread_mutex_unlock(&K);
+}
+
 // ---- time ------------------------------------------------------------------
 
 #define TICK_HZ 19200000ull

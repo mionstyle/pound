@@ -39,6 +39,7 @@ typedef struct cpu
     uint32_t excl_size;
     uint32_t pad_;
     void    *host;      // owned by the host runtime (current thread object)
+    void    *hle_user;  // owned by the host runtime (HLE call context)
 } cpu_t;
 
 typedef void (*recomp_fn_t)(cpu_t *c);

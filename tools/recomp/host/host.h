@@ -40,6 +40,7 @@ extern int host_verbose;
 #define TLS_REGION_BASE   0x3100000000ull // thread local regions (one page per 8 threads)
 // GetInfo 0x1D / 0x1E: a further (addr, size) region queried by the Switch 2 SDK next to
 // heap / alias / ASLR. Its purpose is not known yet; we reserve an empty range for it.
+#define HOST_RESERVED_BASE 0x7E00000000ull // regions above belong to the host runtime (HLE thunks, heap)
 #define EXTRA_REGION_BASE 0x3200000000ull
 #define EXTRA_REGION_SIZE 0x0800000000ull
 // GetInfo 0x1F / 0x20: another (addr, size) pair new on Switch 2, read by the SDK's
@@ -115,6 +116,10 @@ void exec_init(void);
 void exec_map_region(uint64_t addr, uint64_t size); // make a region visible to the interpreter
 void exec_unmap_region(uint64_t addr, uint64_t size);
 
+// Calls guest function `fn` with up to 8 integer arguments on cpu c (registers are restored
+// afterwards; memory effects remain). Usable from host code called by the guest (HLE).
+uint64_t guest_call(cpu_t *c, uint64_t fn, int nargs, const uint64_t *args);
+
 extern uint64_t g_stats_compiled_calls;
 extern uint64_t g_stats_interp_calls;
 
@@ -150,6 +155,7 @@ guest_thread_t *kernel_current_thread(void);
 void kernel_svc(cpu_t *c, uint32_t imm);
 uint32_t kernel_new_event(int signaled, void **out_event); // returns the readable handle
 void     kernel_event_set(void *event, int signaled);
+void     kernel_event_signal(void *event); // from any host thread: signal and wake waiters
 _Noreturn void kernel_exit(int code);
 void           guest_backtrace(const cpu_t *c); // logs the guest call stack (frame pointer chain)
 

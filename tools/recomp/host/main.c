@@ -2,7 +2,7 @@
 //
 //   recomp_run [-v|-vv] <exefs dir>
 
-#include "host.h"
+#include "hle.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -166,6 +166,7 @@ int main(int argc, char **argv)
     uint64_t pid = read_npdm(dir, &stack_size, &prio, &core);
     kernel_init(pid);
     loader_load_exefs(dir);
+    hle_init();
     romfs_build(roots, nroots);
 
     stack_size        = (stack_size + 0xFFF) & ~0xFFFu;

@@ -89,5 +89,13 @@ Boot status (DKB 458752), `recomp_run <exefs> <romfs dir>`:
    to the new graphics supervisor (`nn::gsv`), spoken to with hand-built TIPC messages
    (commands 4, 11, 101, 1501, 1502, 1402); `GetUserSession` requires a non-zero
    AppletResourceUserId.
-5. Stops in `nn::gs::sdk::BootGraphicsSystem` -> `nn::nvsrv::BootWithRemoteMemory`,
-   the start of the NVIDIA driver boot.
+5. Graphics are provided by the host instead of booting the GPU driver (the approach of
+   the Switch 1 recompilation projects, e.g. LAS Recomp): `host/hle.c` replaces SDK
+   functions by symbol name, `nv::InitializeGraphics` is skipped, `nn::vi` (display,
+   layer, native window, 60 Hz vsync event) is implemented on the host
+   (`host/hle_vi.c`), and `nvnBootstrapLoader` / `nvnDeviceGetProcAddress` hand out host
+   procedures (`host/hle_graphics.c`).
+6. The game requests 726 NVN2 procedures (list in `docs/recomp/dkb-nvn2-procs.txt`,
+   including DLSS, ray tracing and mesh shader entry points) and starts with
+   nvnDeviceBuilderSetDefaults / SetFlags / nvnDeviceInitialize. Implementing NVN2 on a
+   host renderer is the next stage.

@@ -201,7 +201,8 @@ uint64_t mem_used_total(void)
 {
     uint64_t total = 0;
     for (int i = 0; i < region_count; ++i)
-        if (regions[i].state != MS_FREE && regions[i].state != MS_INACCESSIBLE && regions[i].state != MS_SHARED)
+        if (regions[i].state != MS_FREE && regions[i].state != MS_INACCESSIBLE && regions[i].state != MS_SHARED &&
+            regions[i].addr < HOST_RESERVED_BASE) // host-owned regions (HLE) are not the guest's memory
             total += regions[i].size;
     return total;
 }
