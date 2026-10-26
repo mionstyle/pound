@@ -24,6 +24,14 @@ typedef enum
 
     /// The memory allocator failed to reserve the requested memory.
     POUND_ERROR_ALLOCATION_FAILED,
+
+    // Loader Errors
+
+    /// File does not match the expected format or is corrupted.
+    POUND_ERROR_INVALID_FORMAT,
+
+    /// Decompressed data does not match the hash stored in the file.
+    POUND_ERROR_HASH_MISMATCH,
 } error_t;
 
 #endif // POUND_ERRORS_H

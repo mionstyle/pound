@@ -178,6 +178,19 @@ add_compiler_flags(PoundJit)
 add_linker_flags(PoundJit)
 add_sanitizers(PoundJit)
 
+message(STATUS "[PoundLoader] Configuring Pound Loader Library...")
+add_library(PoundLoader STATIC
+        src/loader/nso.c
+        src/loader/sha256.c
+)
+target_include_directories(PoundLoader PUBLIC src/loader src/core)
+add_compiler_flags(PoundLoader)
+add_linker_flags(PoundLoader)
+add_sanitizers(PoundLoader)
+
+add_executable(nso_info tools/nso_info.c)
+target_link_libraries(nso_info PRIVATE PoundLoader)
+
 message(STATUS "[PoundGUI] Configuring Pound GUI Library...")
 add_library(PoundGui SHARED
         src/gui/gui.c
