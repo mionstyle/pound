@@ -197,6 +197,15 @@ void mem_query(uint64_t addr, memory_info_t *out)
     out->size = hi - lo;
 }
 
+uint64_t mem_used_total(void)
+{
+    uint64_t total = 0;
+    for (int i = 0; i < region_count; ++i)
+        if (regions[i].state != MS_FREE && regions[i].state != MS_INACCESSIBLE && regions[i].state != MS_SHARED)
+            total += regions[i].size;
+    return total;
+}
+
 void mem_dump_map(void)
 {
     for (int i = 0; i < region_count; ++i)

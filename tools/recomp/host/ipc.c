@@ -15,6 +15,8 @@
 #define R_INVALID_HANDLE 0xE401u
 #define R_SF_UNKNOWN_CMD 0x25A0Au // sf: unknown command (used for explicit failures)
 
+#define APPLET_RESOURCE_USER_ID 0x63ull // any non-zero id identifies the application to services
+
 #define CMIF_IN_MAGIC  0x49434653u // "SFCI"
 #define CMIF_OUT_MAGIC 0x4F434653u // "SFCO"
 
@@ -55,6 +57,8 @@ static uint32_t  next_session_handle = 0xA000;
 
 static session_t *session_get(uint32_t h)
 {
+    if (h == 0)
+        return NULL;
     for (int i = 0; i < MAX_SESSIONS; ++i)
         if (sessions[i].handle == h)
             return &sessions[i];
@@ -353,6 +357,35 @@ static void handle_request(request_t *q, reply_t *r)
         default: break;
         }
     }
+    if (!strncmp(q->iface, "fsp:IStorage(romfs)", 19)) {
+        hipc_msg_t *m = q->msg;
+        switch (q->cmd) {
+        case 0: { // Read(offset, size) -> buffer
+            uint64_t off = rd64(q->in), size = rd64(q->in + 8);
+            uint64_t buf = m->num_b ? m->b_addr[0] : m->x_addr[0];
+            uint64_t cap = m->num_b ? m->b_size[0] : m->x_size[0];
+            if (size > cap)
+                size = cap;
+            romfs_read(off, mem_host(buf), size);
+            if (host_verbose)
+                host_log("ipc: romfs read 0x%llx +0x%llx", (unsigned long long)off, (unsigned long long)size);
+            return;
+        }
+        case 4: reply_u64(r, romfs_size()); return; // GetSize
+        default: break;
+        }
+    }
+    if (!strcmp(q->iface, "am:IWindowController") && q->cmd == 1) { // GetAppletResourceUserId
+        reply_u64(r, APPLET_RESOURCE_USER_ID);
+        return;
+    }
+    if (!strcmp(q->iface, "am:ISelfController") && q->cmd == 2000) {
+        // Switch 2: nn::am::GetGraphicsSupervisor(Out<NativeHandle>) - a session handle to the
+        // graphics supervisor, returned as a copy handle.
+        r->copy[r->num_copy++] = session_new(object_new("am:IGraphicsSupervisor"), 0)->handle;
+        host_log("ipc: am:ISelfController cmd 2000 (GetGraphicsSupervisor) -> session");
+        return;
+    }
     for (size_t i = 0; i < sizeof k_events / sizeof k_events[0]; ++i)
         if (!strcmp(k_events[i].iface, q->iface) && k_events[i].cmd == q->cmd && strcmp(q->iface, "time:u")) {
             r->copy[r->num_copy++] = kernel_new_event(k_events[i].signaled, NULL);
@@ -366,8 +399,15 @@ static void handle_request(request_t *q, reply_t *r)
             return;
         }
     ++g_unknown_logged;
-    host_log("ipc: STUB %s cmd %u (in %u bytes, X%u A%u B%u%s) -> success, zero output", q->iface, q->cmd,
-             q->in_size, q->msg->num_x, q->msg->num_a, q->msg->num_b, q->msg->send_pid ? ", pid" : "");
+    char args[64] = "";
+    if (q->in_size >= 4) {
+        uint32_t n = q->in_size / 4 > 4 ? 4 : q->in_size / 4;
+        int      k = 0;
+        for (uint32_t i = 0; i < n; ++i)
+            k += snprintf(args + k, sizeof args - k, " %08x", rd32(q->in + 4 * i));
+    }
+    host_log("ipc: STUB %s cmd %u (in %u bytes:%s, X%u A%u B%u%s) -> success, zero output", q->iface, q->cmd,
+             q->in_size, args, q->msg->num_x, q->msg->num_a, q->msg->num_b, q->msg->send_pid ? ", pid" : "");
     // Generous zero output: callers read at most what they expect.
     r->data_size = 0x40;
     memset(r->data, 0, r->data_size);

@@ -42,6 +42,10 @@ extern int host_verbose;
 // heap / alias / ASLR. Its purpose is not known yet; we reserve an empty range for it.
 #define EXTRA_REGION_BASE 0x3200000000ull
 #define EXTRA_REGION_SIZE 0x0800000000ull
+// GetInfo 0x1F / 0x20: another (addr, size) pair new on Switch 2, read by the SDK's
+// memory setup. Purpose unknown; an empty reserved range is reported.
+#define EXTRA2_REGION_BASE 0x3A00000000ull
+#define EXTRA2_REGION_SIZE 0x0800000000ull
 
 // Horizon memory states (svc::MemoryState, low byte) and permissions.
 enum
@@ -75,6 +79,7 @@ bool     mem_is_free(uint64_t addr, uint64_t size);
 uint64_t mem_find_free(uint64_t base, uint64_t limit, uint64_t size);
 void    *mem_host(uint64_t addr);
 void     mem_dump_map(void);
+uint64_t mem_used_total(void); // bytes of process memory in use (code, data, stacks, TLS, heap, ...)
 
 static inline uint32_t g_rd32(uint64_t a) { return rd32(a); }
 static inline uint64_t g_rd64(uint64_t a) { return rd64(a); }
@@ -146,6 +151,13 @@ void kernel_svc(cpu_t *c, uint32_t imm);
 uint32_t kernel_new_event(int signaled, void **out_event); // returns the readable handle
 void     kernel_event_set(void *event, int signaled);
 _Noreturn void kernel_exit(int code);
+void           guest_backtrace(const cpu_t *c); // logs the guest call stack (frame pointer chain)
+
+// ---- RomFS (virtual image built from extracted directories) -------------------
+
+int      romfs_build(const char *const *roots, int nroots); // later roots override earlier ones
+uint64_t romfs_size(void);
+void     romfs_read(uint64_t off, uint8_t *dst, uint64_t size);
 
 // ---- IPC ----------------------------------------------------------------------
 

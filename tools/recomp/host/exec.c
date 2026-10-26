@@ -161,8 +161,14 @@ static void interp_call(cpu_t *c, uint64_t target)
     from_uc(c);
     uint64_t pc;
     uc_reg_read(uc, UC_ARM64_REG_PC, &pc);
-    if (e != UC_ERR_OK || pc != INTERP_RETURN_MAGIC)
+    if (e != UC_ERR_OK || pc != INTERP_RETURN_MAGIC) {
+        guest_thread_t *t = kernel_current_thread();
+        host_log("interpreter: thread 0x%x, tls 0x%llx, [tls+0x1f8] = 0x%llx, lr %s", t ? t->handle : 0,
+                 (unsigned long long)c->tpidrro, (unsigned long long)rd64(c->tpidrro + 0x1f8),
+                 addr_describe(c->x[30]));
+        guest_backtrace(c);
         host_fatal("interpreter stopped at %s: %s", addr_describe(pc), uc_strerror(e));
+    }
     c->x[30] = lr;
     uc_cpu   = saved;
 }

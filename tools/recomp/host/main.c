@@ -132,10 +132,31 @@ int main(int argc, char **argv)
     for (; a < argc && argv[a][0] == '-'; ++a)
         host_verbose += (int)strlen(argv[a]) - 1;
     if (a >= argc) {
-        fprintf(stderr, "usage: %s [-v|-vv] <exefs dir>\n", argv[0]);
+        fprintf(stderr, "usage: %s [-v|-vv] <exefs dir> [romfs dir ...]\n", argv[0]);
         return 1;
     }
     const char *dir = argv[a];
+
+    // RomFS roots: given explicitly after the exefs, otherwise <exefs>/../romfs and, for an
+    // update laid out as <dump>/updates/<v>/exefs, the base RomFS underneath it.
+    const char *roots[8];
+    int         nroots = 0;
+    static char base_romfs[1024], upd_romfs[1024];
+    if (a + 1 < argc) {
+        for (int i = a + 1; i < argc && nroots < 8; ++i)
+            roots[nroots++] = argv[i];
+    } else {
+        // An update dumped this way carries the complete, already patched RomFS, so it is
+        // used on its own; the base RomFS is the fallback.
+        snprintf(upd_romfs, sizeof upd_romfs, "%s/../romfs", dir);
+        snprintf(base_romfs, sizeof base_romfs, "%s/../../../base/romfs", dir);
+        FILE *probe = NULL;
+        char  probe_path[1100];
+        snprintf(probe_path, sizeof probe_path, "%s/.listing", upd_romfs);
+        probe = fopen(probe_path, "rb");
+        if (probe) fclose(probe);
+        roots[nroots++] = probe ? upd_romfs : base_romfs;
+    }
 
     if (mem_init())
         host_fatal("cannot reserve the guest address space");
@@ -145,6 +166,7 @@ int main(int argc, char **argv)
     uint64_t pid = read_npdm(dir, &stack_size, &prio, &core);
     kernel_init(pid);
     loader_load_exefs(dir);
+    romfs_build(roots, nroots);
 
     stack_size        = (stack_size + 0xFFF) & ~0xFFFu;
     uint64_t stack_lo = STACK_REGION_BASE;

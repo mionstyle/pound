@@ -75,7 +75,19 @@ host/build_host.sh gen/ recomp_run                                 # link what e
 recomp_run [-v] <exefs dir>
 ```
 
-Boot status (DKB 458752): rtld relocates all modules, the SDK initialises the
-address space (Switch 2 adds GetInfo 0x1D/0x1E, an extra region), connects to `sm:`
-over TIPC and opens lm, appletOE (command 10 on Switch 2), the am proxy objects,
-aoc:u, ectx:aw and pctl. It then stops where stubbed services return zeros.
+Boot status (DKB 458752), `recomp_run <exefs> <romfs dir>`:
+
+1. rtld relocates all modules; the SDK sets up the address space. Switch 2 adds
+   GetInfo ids 0x1D/0x1E and 0x1F/0x20 (two more address/size regions) and 0x21
+   (page granularity, 0x1000, used to align RELRO protection).
+2. `sm:` over TIPC; lm, appletOE (command 10 on Switch 2), the am proxy objects, aoc:u,
+   ectx:aw, pctl, time:u.
+3. The game's own code runs: it opens its RomFS (built on the fly from the extracted
+   directory by `host/romfs.c`) and reads `System/HeapSize/Product.Nin_Ounce_NVN2.HeapDef.byml.zs`;
+   its memory budget check needs a realistic UsedMemorySize.
+4. Graphics boot: `nn::am::GetGraphicsSupervisor` (ISelfController 2000) returns a session
+   to the new graphics supervisor (`nn::gsv`), spoken to with hand-built TIPC messages
+   (commands 4, 11, 101, 1501, 1502, 1402); `GetUserSession` requires a non-zero
+   AppletResourceUserId.
+5. Stops in `nn::gs::sdk::BootGraphicsSystem` -> `nn::nvsrv::BootWithRemoteMemory`,
+   the start of the NVIDIA driver boot.

@@ -318,6 +318,22 @@ _Noreturn void kernel_exit(int code)
     exit(code);
 }
 
+void guest_backtrace(const cpu_t *c)
+{
+    host_log("  guest call stack (frame pointers):");
+    uint64_t fp = c->x[29];
+    host_log("    lr %s", addr_describe(c->x[30]));
+    for (int depth = 0; depth < 32 && fp && (fp & 7) == 0; ++depth) {
+        memory_info_t mi;
+        mem_query(fp, &mi);
+        if (mi.state == MS_FREE || mi.state == MS_INACCESSIBLE)
+            break;
+        uint64_t ret = rd64(fp + 8);
+        host_log("    #%-2d %s", depth, addr_describe(ret));
+        fp = rd64(fp);
+    }
+}
+
 // ---- SVC helpers -----------------------------------------------------------------
 
 static const char *svc_name(uint32_t n)
@@ -363,7 +379,7 @@ static void svc_get_info(cpu_t *c)
     case 4: out = HEAP_REGION_BASE; break;
     case 5: out = HEAP_REGION_SIZE; break;
     case 6: out = 0x1C0000000ull; break;                    // total memory available to the application
-    case 7: out = g_heap_size + 0x10000000ull; break;       // used memory (approximate)
+    case 7: out = mem_used_total(); break;                  // used memory
     case 8: out = 0; break;                                 // debugger attached
     case 9: out = handle_alloc(H_RESOURCE_LIMIT, NULL, 0, 0); break;
     case 10: out = 0; break;                                // idle tick count
@@ -377,7 +393,7 @@ static void svc_get_info(cpu_t *c)
     case 18: out = g_program_id; break;
     case 20: out = g_current->tls + 0x100; break;           // user exception context
     case 21: out = 0x1C0000000ull; break;
-    case 22: out = g_heap_size + 0x10000000ull; break;
+    case 22: out = mem_used_total(); break;                 // used non-system memory
     case 23: out = 1; break;                                // is application
     case 24: out = 64; break;                               // free thread count
     case 25: out = 0; break;                                // thread tick count
@@ -385,7 +401,9 @@ static void svc_get_info(cpu_t *c)
     case 28: out = 0; break;                                // alias region extra size
     case 29: out = EXTRA_REGION_BASE; break;                // Switch 2: unknown region (address)
     case 30: out = EXTRA_REGION_SIZE; break;                // Switch 2: unknown region (size)
-    case 33: out = 0; break;                                // Switch 2: size the SDK maps with MapPhysicalMemory at the alias region start
+    case 31: out = EXTRA2_REGION_BASE; break;               // Switch 2: unknown region (address)
+    case 32: out = EXTRA2_REGION_SIZE; break;               // Switch 2: unknown region (size)
+    case 33: out = 0x1000; break;                           // Switch 2: page granularity (used to align RELRO protection and the first MapPhysicalMemory)
     default:
         host_log("GetInfo: unknown id 0x%x / 0x%llx", id0, (unsigned long long)id1);
         RET(R_INVALID_ENUM);
@@ -655,6 +673,19 @@ static void kernel_svc_locked(cpu_t *c, uint32_t imm)
                  (unsigned long long)X(2), addr_describe(c->pc));
         if (X(2) == 4)
             host_log("  result code 0x%x", rd32(X(1)));
+        const char *watch = getenv("RECOMP_WATCH"); // comma separated module offsets, e.g. main+0x26d50f8
+        while (watch && *watch) {
+            char mod[16] = {0};
+            unsigned long long off = 0;
+            if (sscanf(watch, "%15[^+]+%llx", mod, &off) == 2)
+                for (int i = 0; i < g_module_count; ++i)
+                    if (!strcmp(g_modules[i].name, mod))
+                        host_log("  watch %s+0x%llx = 0x%016llx", mod, off,
+                                 (unsigned long long)rd64(g_modules[i].base + off));
+            watch = strchr(watch, ',');
+            if (watch) ++watch;
+        }
+        guest_backtrace(c);
         kernel_exit(3);
     }
     case 0x27: { // OutputDebugString(str, len)
