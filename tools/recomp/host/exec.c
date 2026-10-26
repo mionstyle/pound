@@ -207,7 +207,7 @@ static uc_engine *new_engine(int depth)
     uc_hook_add(e, &h2, UC_HOOK_MEM_INVALID, (void *)on_invalid, NULL, 1, 0);
     uc_hook h3;
     uc_hook_add(e, &h3, UC_HOOK_CODE, (void *)on_hle_code, NULL, HLE_THUNK_BASE, HLE_THUNK_BASE + HLE_THUNK_SIZE - 1);
-    if (!getenv("RECOMP_NO_BLOCK_DISPATCH") && g_module_count) {
+    if (getenv("RECOMP_BLOCK_DISPATCH") && g_module_count) {
         uc_hook hb;
         uint64_t lo = g_modules[0].base, hi = 0;
         for (int i = 0; i < g_module_count; ++i)
