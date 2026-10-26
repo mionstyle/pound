@@ -29,8 +29,9 @@ for m in "${MODULES[@]}"; do
     if [ ! -f "$lib" ]; then
         echo "$m: compiling $(ls "$GEN/$m"/*.c | wc -l) files for Windows ($OPT)"
         mkdir -p "$OUT/obj/$m"
+        # Objects already built are kept, so an interrupted build resumes where it stopped.
         (cd "$GEN/$m" && ls *.c | xargs -P "$JOBS" -I{} sh -c \
-            "$CC $OPT -fno-strict-aliasing -w -I$ROOT/tools/recomp/runtime -c {} -o $OUT/obj/$m/{}.o || echo 'COMPILE FAILED: $m/{}'")
+            "[ -s $OUT/obj/$m/{}.o ] || $CC $OPT -fno-strict-aliasing -w -I$ROOT/tools/recomp/runtime -c {} -o $OUT/obj/$m/{}.o.tmp && mv $OUT/obj/$m/{}.o.tmp $OUT/obj/$m/{}.o || echo 'COMPILE FAILED: $m/{}'")
         "$MINGW/bin/llvm-ar" rcs "$lib" "$OUT/obj/$m"/*.o
     fi
     LIBS+=("$lib")
@@ -41,7 +42,7 @@ echo "linking recomp_run.exe with: ${MODULES[*]}"
     -I"$ROOT/tools/recomp/runtime" -I"$ROOT/src/loader" -I"$ROOT/src/core" -I"$UNICORN_SRC/include" \
     "$ROOT"/tools/recomp/host/*.c "$ROOT/src/loader/nso.c" "$ROOT/src/loader/sha256.c" \
     -Wl,--whole-archive "${LIBS[@]}" -Wl,--no-whole-archive \
-    "$UNICORN_WIN/libunicorn.dll.a" -static -lpthread -Wl,--stack,67108864 -s \
+    "$UNICORN_WIN/libunicorn.dll.a" -static -lpthread -lgdi32 -luser32 -Wl,--stack,67108864 -s \
     -o "$OUT/recomp_run.exe"
 cp -f "$UNICORN_WIN/libunicorn.dll" "$OUT/"
 cp -f "$MINGW/x86_64-w64-mingw32/bin/libwinpthread-1.dll" "$OUT/" # needed by libunicorn.dll
