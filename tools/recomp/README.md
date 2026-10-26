@@ -52,8 +52,7 @@ Dependencies: Capstone 5 (decoder) and Unicorn 2 (tests only), Python 3.
   failure is an unsupported SIMD instruction in a callee. 206 functions could not
   be tested because the reference itself faults on random inputs.
 - Not handled yet: FPCR rounding modes other than round-to-nearest, flush-to-zero,
-  exclusive load/store (unused by this title), `svc` (needs the kernel layer),
-  `mrs` of the system counter.
+  exclusive load/store pairs (`ldxp`/`stxp`).
 
 ## Host runtime (`host/`)
 
