@@ -50,6 +50,12 @@ void recomp_trap(cpu_t *c, uint64_t pc, const char *reason)
     siglongjmp(jb, H_TRAP);
 }
 
+void recomp_resume(cpu_t *c, uint64_t pc, uint64_t lr)
+{
+    (void)lr;
+    recomp_trap(c, pc, "needs interpreter fallback");
+}
+
 void recomp_svc(cpu_t *c, uint32_t imm)
 {
     last_addr = c->pc;
@@ -141,3 +147,5 @@ int h_run(uint64_t fn_off, cpu_t *c, int timeout_ms)
 }
 
 size_t h_cpu_size(void) { return sizeof(cpu_t); }
+uint64_t recomp_cntpct(void) { return 0; }
+uint64_t recomp_cntfrq(void) { return 19200000; }

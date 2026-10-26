@@ -54,3 +54,29 @@ Dependencies: Capstone 5 (decoder) and Unicorn 2 (tests only), Python 3.
 - Not handled yet: FPCR rounding modes other than round-to-nearest, flush-to-zero,
   exclusive load/store (unused by this title), `svc` (needs the kernel layer),
   `mrs` of the system counter.
+
+## Host runtime (`host/`)
+
+`recomp_run <exefs dir>` boots a title: it loads rtld, main and sdk like the Horizon
+loader (contiguous code region, Code / CodeData states), creates the main thread
+(stack and TLS from `main.npdm`) and jumps to rtld.
+
+- `exec.c`: calls go to the recompiled function when one exists; otherwise, and for
+  instructions the translator does not support, execution continues in Unicorn
+  (one engine per thread, sharing guest memory) until the function returns.
+- `kernel.c`: the SVCs needed by boot. Guest threads are host threads and run in
+  parallel; mutexes, condition variables, the address arbiter and
+  WaitSynchronization follow the Horizon kernel semantics.
+- `ipc.c`: HIPC / CMIF (with domains) / TIPC, `sm:`, and a generic service layer
+  where unimplemented commands succeed with zero output and are logged.
+
+```
+host/build_modules.sh <dir with rtld.bin sdk.bin main.bin> gen/   # translate + compile
+host/build_host.sh gen/ recomp_run                                 # link what exists
+recomp_run [-v] <exefs dir>
+```
+
+Boot status (DKB 458752): rtld relocates all modules, the SDK initialises the
+address space (Switch 2 adds GetInfo 0x1D/0x1E, an extra region), connects to `sm:`
+over TIPC and opens lm, appletOE (command 10 on Switch 2), the am proxy objects,
+aoc:u, ectx:aw and pctl. It then stops where stubbed services return zeros.

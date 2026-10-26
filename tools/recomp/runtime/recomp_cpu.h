@@ -33,6 +33,12 @@ typedef struct cpu
     uint8_t  n, z, cf, v;
     uint32_t fpcr, fpsr;
     vreg_t   q[32];
+    uint64_t tpidrro;   // TPIDRRO_EL0 (thread local region, read-only to EL0)
+    uint64_t excl_addr; // exclusive monitor (LDXR/STXR emulation)
+    uint64_t excl_val;
+    uint32_t excl_size;
+    uint32_t pad_;
+    void    *host;      // owned by the host runtime (current thread object)
 } cpu_t;
 
 typedef void (*recomp_fn_t)(cpu_t *c);
@@ -42,6 +48,11 @@ extern uint8_t *recomp_mem_base;
 void            recomp_dispatch(cpu_t *c, uint64_t target);              // call to an arbitrary address
 void            recomp_trap(cpu_t *c, uint64_t pc, const char *reason); // never returns
 void            recomp_svc(cpu_t *c, uint32_t imm);
+// Continues the current guest call at `pc` in the fallback interpreter until it
+// returns to `lr` (the function's return address), then returns to the caller.
+void            recomp_resume(cpu_t *c, uint64_t pc, uint64_t lr);
+uint64_t        recomp_cntpct(void);
+uint64_t        recomp_cntfrq(void);
 
 #ifndef RECOMP_CHECK_ADDR
 #define RECOMP_CHECK_ADDR(a, n) ((void)0)

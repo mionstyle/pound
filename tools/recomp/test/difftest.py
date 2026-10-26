@@ -41,7 +41,9 @@ class Cpu(ctypes.Structure):
     _fields_ = [("x", ctypes.c_uint64 * 31), ("sp", ctypes.c_uint64), ("pc", ctypes.c_uint64),
                 ("tpidr", ctypes.c_uint64), ("n", ctypes.c_uint8), ("z", ctypes.c_uint8),
                 ("cf", ctypes.c_uint8), ("v", ctypes.c_uint8), ("fpcr", ctypes.c_uint32),
-                ("fpsr", ctypes.c_uint32), ("q", VReg * 32)]
+                ("fpsr", ctypes.c_uint32), ("q", VReg * 32), ("tpidrro", ctypes.c_uint64),
+                ("excl_addr", ctypes.c_uint64), ("excl_val", ctypes.c_uint64), ("excl_size", ctypes.c_uint32),
+                ("pad_", ctypes.c_uint32), ("host", ctypes.c_void_p)]
 
 
 XREGS = [globals()[f"UC_ARM64_REG_X{i}"] for i in range(29)] + [UC_ARM64_REG_X29, UC_ARM64_REG_X30]

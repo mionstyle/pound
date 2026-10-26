@@ -36,7 +36,7 @@ SFT_LSL, SFT_MSL, SFT_LSR, SFT_ASR, SFT_ROR = 1, 2, 3, 4, 5
 EXT = {1: ("uint8_t", False), 2: ("uint16_t", False), 3: ("uint32_t", False), 4: ("uint64_t", False),
        5: ("int8_t", True), 6: ("int16_t", True), 7: ("int32_t", True), 8: ("int64_t", True)}
 
-NOPS = {"nop", "pacibsp", "paciasp", "autibsp", "autiasp", "pacibz", "paciaz", "autibz", "autiaz",
+NOPS = {"dc", "ic", "tlbi", "wfe", "wfi", "sev", "nop", "pacibsp", "paciasp", "autibsp", "autiasp", "pacibz", "paciaz", "autibz", "autiaz",
         "xpaclri", "bti", "yield", "dmb", "dsb", "isb", "prfm", "prfum", "clrex", "hint", "sevl",
         "pacia1716", "pacib1716", "autia1716", "autib1716", "csdb", "esb", "psb"}
 RETS = {"ret", "retaa", "retab"}
@@ -47,6 +47,15 @@ ATOMIC_OPS = {"ldadd": "add", "ldclr": "clr", "ldset": "set", "ldeor": "eor", "s
 
 class Unsupported(Exception):
     pass
+
+
+# Per-module naming (set from --prefix): functions are f<PFX>_<offset>, the module base
+# variable is recomp_module_base<PFX> and the table recomp_table<PFX>.
+PFX = ""
+
+
+def fname(a):
+    return f"f{PFX}_{a:x}"
 
 
 def rindex(name):
@@ -180,7 +189,7 @@ class FunctionTranslator:
             return f"goto L_{target:x};"
         if target in self.funcs:
             self.callees.add(target)
-            call = f"f_{target:x}(c);"
+            call = f"{fname(target)}(c);"
         else:
             call = f"recomp_dispatch(c, MB + 0x{target:x}ull);"
         return call + (" return;" if tail else "")
@@ -197,48 +206,55 @@ class FunctionTranslator:
             except (Unsupported, IndexError, KeyError, ValueError, AttributeError) as e:
                 key = i.mnemonic if isinstance(e, Unsupported) else f"{i.mnemonic} [{type(e).__name__}: {i.op_str}]"
                 self.unsupported[key] += 1
-                lines = [f'recomp_trap(c, MB + 0x{i.address:x}ull, "unsupported: {i.mnemonic} {i.op_str} ({e})");']
+                # Continue this call in the interpreter from here (registers are exact at this point).
+                lines = [f'recomp_resume(c, MB + 0x{i.address:x}ull, lr_); return; /* unsupported: {i.mnemonic} {i.op_str} */']
             body.append((i, lines))
 
-        out = [f"void f_{self.start:x}(cpu_t *c)", "{"]
+        out = [f"void {fname(self.start)}(cpu_t *c)", "{", "    const uint64_t lr_ = c->x[30]; (void)lr_;"]
         for i, lines in body:
             if i.address in self.labels:
                 out.append(f"L_{i.address:x}:;")
             out.append(f"    /* {i.address:08x}: {i.mnemonic} {i.op_str} */")
             out.extend("    " + l for l in lines)
-        out.append(f'    recomp_trap(c, MB + 0x{self.end:x}ull, "fell off end of function");')
+        out.append(f'    recomp_resume(c, MB + 0x{self.end:x}ull, lr_); /* fell off the end */')
         out.append("}")
         return "\n".join(out)
 
     def find_jump_table(self, k):
-        """Recognises the LLVM AArch64 jump table sequence ending at insns[k] (`br xT`):
-            cmp   wI, #N ; b.hi default          (bound)
-            adrp  xTab, page ; add xTab, xTab, #lo
+        """Recognises jump table dispatch ending at insns[k] (`br xT`):
+            cmp   xI, #N ; b.hi default                        (bound, anywhere in the function)
+            adrp  xTab, page ; add xTab, xTab, #lo   |  adr xTab, table
             adr   xB, base
-            ldr{b,h,sb,sh,,sw} wE, [xTab, xI, lsl #s]
-            add   xT, xB, xE(, sxtw), lsl #2
+            ldr{b,h,sb,sh,,sw} xE, [xTab, xI(, lsl #s)]
+            add   xT, xB, xE(, sxtw)(, lsl #2)
             br    xT
-        Returns the sorted list of target offsets, or None."""
+        (LLVM emits entries in words, hand-written code in bytes.) Returns sorted target
+        offsets, or None."""
         ins = self.insns
         br = ins[k]
         reg_t = br.reg_name(br.operands[0].reg)
-        window = ins[max(0, k - 24):k]
+        lo = [max(0, k - 24)]
 
-        def last_def(name, before):
-            for j in range(len(window) - 1 - before, -1, -1):
-                w = window[j]
+        def last_def(name, before_k):
+            for j in range(before_k - 1, lo[0] - 1, -1):
+                w = ins[j]
                 if w.id and w.operands and w.operands[0].type == A.ARM64_OP_REG:
                     if w.reg_name(w.operands[0].reg) in (name, "w" + name[1:], "x" + name[1:]):
                         return j, w
+                if w.id and (w.mnemonic in ("b", "br", "ret", "retab") or w.mnemonic.startswith(("b.", "cb", "tb"))):
+                    if w.address != br.address:
+                        pass
             return None, None
 
-        j, add = last_def(reg_t, 0)
+        j, add = last_def(reg_t, k)
         if add is None or add.mnemonic != "add" or len(add.operands) != 3 or add.operands[2].type != A.ARM64_OP_REG:
             return None
+        op2 = add.operands[2]
+        scale = 1 << op2.shift.value if op2.shift.type == SFT_LSL else 1
         rb = add.reg_name(add.operands[1].reg)
-        re_ = add.reg_name(add.operands[2].reg)
-        jb, adr = last_def(rb, len(window) - j)
-        jl, ld = last_def(re_, len(window) - j)
+        re_ = add.reg_name(op2.reg)
+        jb, adr = last_def(rb, j)
+        jl, ld = last_def(re_, j)
         if adr is None or adr.mnemonic != "adr" or ld is None or not ld.mnemonic.startswith("ldr"):
             return None
         base = adr.operands[1].imm
@@ -253,25 +269,38 @@ class FunctionTranslator:
             return None
         rtab = ld.reg_name(memop.mem.base)
         ridx = ld.reg_name(memop.mem.index)
-        ja, addlo = last_def(rtab, len(window) - jl)
-        if addlo is None:
+        # table address: adr, or adrp (+ add)
+        lo[0] = 0  # the table address is often loop-invariant and set up far before
+        ja, tdef = last_def(rtab, jl)
+        if tdef is None:
             return None
-        adrp = None
-        if addlo.mnemonic == "add" and addlo.operands[2].type == A.ARM64_OP_IMM:
-            jp, adrp = last_def(rtab, len(window) - ja)
+        if tdef.mnemonic == "adr":
+            table = tdef.operands[1].imm
+        elif tdef.mnemonic == "add" and tdef.operands[2].type == A.ARM64_OP_IMM:
+            jp, adrp = last_def(rtab, ja)
             if adrp is None or adrp.mnemonic != "adrp":
                 return None
-            table = adrp.operands[1].imm + addlo.operands[2].imm
-        elif addlo.mnemonic == "adrp":
-            table = addlo.operands[1].imm
+            table = adrp.operands[1].imm + tdef.operands[2].imm
+        elif tdef.mnemonic == "adrp":
+            table = tdef.operands[1].imm
         else:
             return None
-        # Bound: `cmp idx, #N` + conditional branch guarding the table sequence. Either the
-        # branch skips to the default (b.hi / b.hs falling through into the sequence) or it
-        # jumps to the sequence (b.ls / b.lo). The guard may be far from the br.
-        seq_start = min(w.address for w in (adr, ld, addlo, adrp) if w is not None)
+
+        # Bound: `cmp idx, #N` + conditional branch whose fall-through (b.hi/b.hs) or target
+        # (b.ls/b.lo) reaches the table load without other control flow.
+        pos = {w.address: n for n, w in enumerate(ins)}
+
+        def straight(from_addr, to_addr):
+            if from_addr not in pos or to_addr not in pos or from_addr > to_addr:
+                return False
+            for m in range(pos[from_addr], pos[to_addr]):
+                w = ins[m]
+                if not w.id or w.mnemonic in ("b", "br", "ret", "retab", "bl", "blr") or \
+                        w.mnemonic.startswith(("b.", "cb", "tb")):
+                    return False
+            return True
+
         count = None
-        k_ins = {w.address: n for n, w in enumerate(ins)}
         idx_names = (ridx, "w" + ridx[1:], "x" + ridx[1:])
         for n in range(len(ins) - 1):
             w, nb = ins[n], ins[n + 1]
@@ -282,15 +311,11 @@ class FunctionTranslator:
             if w.reg_name(w.operands[-2].reg) not in idx_names:
                 continue
             N = w.operands[-1].imm
-            tgt = nb.operands[0].imm
             cond = COND.get(nb.cc)
-            falls_into = nb.address + 4 == seq_start or (nb.address + 4 < seq_start and all(
-                ins[m].mnemonic not in ("b", "br", "ret", "retab") and not ins[m].mnemonic.startswith(("b.", "cb", "tb"))
-                for m in range(n + 2, k_ins.get(seq_start, n + 2))))
-            if tgt == seq_start and cond in ("LS", "LO"):
-                count = N + 1 if cond == "LS" else N
-            elif falls_into and cond in ("HI", "HS"):
+            if cond in ("HI", "HS") and straight(nb.address + 4, ld.address):
                 count = N + 1 if cond == "HI" else N
+            elif cond in ("LS", "LO") and straight(nb.operands[0].imm, ld.address):
+                count = N + 1 if cond == "LS" else N
             if count is not None:
                 break
         if count is None or count > 4096:
@@ -305,7 +330,7 @@ class FunctionTranslator:
             if off + size > len(d):
                 return None
             e = struct.unpack_from("<" + fmt, d, off)[0]
-            targets.add(base + 4 * e)
+            targets.add(base + scale * e)
         if not all(self.start <= t < self.end for t in targets):
             return None
         return sorted(targets)
@@ -318,10 +343,10 @@ class FunctionTranslator:
             self.jump_tables += 1
             cases = " ".join(f"case 0x{t:x}: goto L_{t:x};" for t in table)
             return [f"{{ uint64_t t_ = {tvar} - MB; switch (t_) {{ {cases} }}",
-                    f'  recomp_trap(c, {tvar}, "jump table target out of range"); }}']
+                    f'  recomp_resume(c, {tvar}, lr_); return; }}']
         # Otherwise: an indirect tail call (e.g. virtual call after the epilogue).
         return [f"{{ uint64_t t_ = {tvar};",
-                f"  if (t_ - MB >= 0x{self.start:x}ull && t_ - MB < 0x{self.end:x}ull) recomp_trap(c, t_, \"unresolved intra-function indirect jump\");",
+                f"  if (t_ - MB >= 0x{self.start:x}ull && t_ - MB < 0x{self.end:x}ull) {{ recomp_resume(c, t_, lr_); return; }}",
                 "  recomp_dispatch(c, t_); return; }"]
 
     def insn(self, i):
@@ -366,7 +391,9 @@ class FunctionTranslator:
         if mn == "mrs":
             rd = self.reg(i, ops[0])
             sysreg = i.op_str.split(",")[1].strip().lower()
-            src = {"tpidr_el0": "c->tpidr", "fpcr": "c->fpcr", "fpsr": "c->fpsr",
+            src = {"tpidr_el0": "c->tpidr", "tpidrro_el0": "c->tpidrro", "fpcr": "c->fpcr", "fpsr": "c->fpsr",
+                   "cntpct_el0": "recomp_cntpct()", "cntvct_el0": "recomp_cntpct()",
+                   "cntfrq_el0": "recomp_cntfrq()", "ctr_el0": "0x8444c004ull", "dczid_el0": "0x4ull",
                    "nzcv": "((uint64_t)c->n << 31 | (uint64_t)c->z << 30 | (uint64_t)c->cf << 29 | (uint64_t)c->v << 28)"}.get(sysreg)
             if src is None:
                 raise Unsupported(f"mrs {sysreg}")
@@ -374,9 +401,11 @@ class FunctionTranslator:
         if mn == "msr":
             parts = [p.strip().lower() for p in i.op_str.split(",")]
             if parts[0] in ("fpcr", "fpsr", "tpidr_el0") and len(ops) >= 1:
-                src = rget(i.reg_name(ops[-1].reg))
+                src = rget(parts[1])
                 dst = {"fpcr": "c->fpcr", "fpsr": "c->fpsr", "tpidr_el0": "c->tpidr"}[parts[0]]
                 return [f"{dst} = {src};"]
+            if parts[0] == "nzcv":
+                return [f"setnzcv(c, (unsigned)({rget(parts[1])} >> 28) & 15);"]
             raise Unsupported(f"msr {parts[0]}")
 
         # ---- loads / stores --------------------------------------------
@@ -649,9 +678,25 @@ class FunctionTranslator:
         if mn.startswith("cas"):
             return self.cas(i)
 
+        if mn in ("ldxr", "ldaxr", "ldxrb", "ldaxrb", "ldxrh", "ldaxrh"):
+            rt = i.reg_name(ops[0].reg)
+            size = 1 if mn.endswith("b") else 2 if mn.endswith("h") else bits_of(rt) // 8
+            addr, _ = self.mem_addr(i, ops[1])
+            return [f"{{ uint64_t a_ = {addr}; uint64_t v_ = rd{size * 8}(a_);",
+                    f"  c->excl_addr = a_; c->excl_val = v_; c->excl_size = {size}; {rset(rt, 'v_')} }}"]
+        if mn in ("stxr", "stlxr", "stxrb", "stlxrb", "stxrh", "stlxrh"):
+            ws, rt = i.reg_name(ops[0].reg), i.reg_name(ops[1].reg)
+            size = 1 if mn.endswith("b") else 2 if mn.endswith("h") else bits_of(rt) // 8
+            T = f"uint{size * 8}_t"
+            addr, _ = self.mem_addr(i, ops[2])
+            # Emulated with compare-and-swap against the value seen by the load-exclusive.
+            return [f"{{ uint64_t a_ = {addr}; int ok_ = 0;",
+                    f"  if (c->excl_size == {size} && c->excl_addr == a_) {{ {T} exp_ = ({T})c->excl_val;",
+                    f"    ok_ = __atomic_compare_exchange_n(({T} *)R_HOST(a_, {size}), &exp_, ({T}){rget(rt)}, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); }}",
+                    f"  c->excl_size = 0; {rset(ws, '!ok_')} }}"]
         if mn.startswith(("ldx", "ldax", "stx", "stlx", "ldnf", "ld1", "ld2", "ld3", "ld4",
                           "st1", "st2", "st3", "st4")):
-            raise Unsupported("exclusive / vector structure access")
+            raise Unsupported("exclusive pair / vector structure access")
 
         pair = mn in ("ldp", "stp", "ldnp", "stnp", "ldpsw")
         is_load = mn.startswith("ld")
@@ -950,8 +995,8 @@ PRELUDE = """// Generated by tools/recomp/recomp.py. Do not edit.
 #include "recomp_cpu.h"
 #include <math.h>
 
-extern uint64_t recomp_module_base;
-#define MB recomp_module_base
+extern uint64_t recomp_module_base@PFX@;
+#define MB recomp_module_base@PFX@
 
 static inline int64_t  recomp_fcvtzs64_f64(double v) { if (v != v) return 0; if (v >= 9223372036854775807.0) return INT64_MAX; if (v <= -9223372036854775808.0) return INT64_MIN; return (int64_t)v; }
 static inline int32_t  recomp_fcvtzs32_f64(double v) { if (v != v) return 0; if (v >= 2147483647.0) return INT32_MAX; if (v <= -2147483648.0) return INT32_MIN; return (int32_t)v; }
@@ -979,9 +1024,15 @@ def main(argv):
     p.add_argument("--all", action="store_true")
     p.add_argument("--stats", action="store_true")
     p.add_argument("--per-file", type=int, default=2000)
+    p.add_argument("--prefix", default="", help="module name used in symbol names (e.g. sdk)")
+    p.add_argument("--clean-only", action="store_true",
+                   help="only emit functions with no unsupported instruction; others go through recomp_dispatch")
+    p.add_argument("--no-comments", action="store_true", help="omit per-instruction comments")
     p.add_argument("--callee-depth", type=int, default=0,
                    help="also translate functions called (directly) by the selection, up to this depth")
     args = p.parse_args(argv[1:])
+    global PFX
+    PFX = f"_{args.prefix}" if args.prefix else ""
 
     mod = analyze.Module("mod", args.module)
     text_end = mod.mod0 & ~0xFFF
@@ -1003,6 +1054,7 @@ def main(argv):
     clean = 0
     fn_clean = {}
     chunks, chunk, decls = [], [], set()
+    emitted = []
     queue = [(a, 0) for a in selected]
     seen = set(selected)
     selected = []
@@ -1020,6 +1072,11 @@ def main(argv):
         fn_clean[start] = not tr.unsupported
         clean += not tr.unsupported
         decls |= tr.callees | {start}
+        if args.clean_only and tr.unsupported:
+            continue
+        if args.no_comments:
+            code = "\n".join(l for l in code.split("\n") if not l.lstrip().startswith("/* "))
+        emitted.append(start)
         chunk.append(code)
         if len(chunk) >= args.per_file:
             chunks.append(chunk)
@@ -1030,21 +1087,22 @@ def main(argv):
     with open(os.path.join(args.out, "funcs.h"), "w") as f:
         f.write("#pragma once\n#include \"recomp_cpu.h\"\n")
         for a in sorted(decls):
-            f.write(f"void f_{a:x}(cpu_t *c);\n")
+            f.write(f"void {fname(a)}(cpu_t *c);\n")
     for n, ch in enumerate(chunks):
         with open(os.path.join(args.out, f"funcs_{n:03d}.c"), "w") as f:
-            f.write(PRELUDE + '#include "funcs.h"\n\n' + "\n\n".join(ch) + "\n")
+            f.write(PRELUDE.replace("@PFX@", PFX) + '#include "funcs.h"\n\n' + "\n\n".join(ch) + "\n")
     selected.sort()
+    emitted.sort()
     with open(os.path.join(args.out, "table.c"), "w") as f:
-        f.write('#include "funcs.h"\n#include <stddef.h>\nextern uint64_t recomp_module_base;\n')
+        f.write(f'#include "funcs.h"\n#include <stddef.h>\nextern uint64_t recomp_module_base{PFX};\n')
         f.write("typedef struct { uint64_t addr; recomp_fn_t fn; } recomp_entry_t;\n")
-        f.write("const recomp_entry_t recomp_table[] = {\n")
-        for a in selected:
-            f.write(f"    {{0x{a:x}ull, f_{a:x}}},\n")
-        f.write("};\nconst size_t recomp_table_size = sizeof(recomp_table) / sizeof(recomp_table[0]);\n")
-        stubs = sorted(decls - set(selected))
+        f.write(f"const recomp_entry_t recomp_table{PFX}[] = {{\n")
+        for a in emitted:
+            f.write(f"    {{0x{a:x}ull, {fname(a)}}},\n")
+        f.write(f"}};\nconst size_t recomp_table{PFX}_size = sizeof(recomp_table{PFX}) / sizeof(recomp_table{PFX}[0]);\n")
+        stubs = sorted(decls - set(emitted))
         for a in stubs:
-            f.write(f'void f_{a:x}(cpu_t *c) {{ recomp_dispatch(c, recomp_module_base + 0x{a:x}ull); }}\n')
+            f.write(f'void {fname(a)}(cpu_t *c) {{ recomp_dispatch(c, recomp_module_base{PFX} + 0x{a:x}ull); }}\n')
 
     if args.stats:
         n = len(selected)
