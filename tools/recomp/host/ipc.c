@@ -308,6 +308,11 @@ static const struct { const char *iface; uint32_t cmd; const char *ret; } k_retu
     { "nifm:u", 4, "nifm:IGeneralService" },  // CreateGeneralServiceOld
     { "nifm:u", 5, "nifm:IGeneralService" },  // CreateGeneralService
     { "bcat:u", 0, "bcat:IBcatService" },     // CreateBcatService
+    { "aud:u", 2, "aud:IAudioRendererManager" }, // Switch 2: nn::audio::CreateAudioRendererManager
+    { "aud:IAudioRendererManager", 0, "aud:IAudioRenderer" }, // OpenAudioRenderer
+    { "aud:IAudioRendererManager", 4, "aud:IAudioDevice" },   // GetAudioDeviceService(aruid)
+    { "stpl:u", 0, "stpl:IStreamPlayService" },              // Switch 2 nn::streamplay (GameShare)
+    { "nfp:user", 0, "nfp:IUser" },                          // CreateUserInterface (amiibo)
 };
 
 // Commands that fail with a fixed result, mirroring an offline console with no content.
@@ -319,6 +324,10 @@ static const struct { const char *iface; uint32_t cmd; uint32_t result; const ch
 // Commands known to return a (copy) handle to an event: (interface, command, initially signalled).
 static const struct { const char *iface; uint32_t cmd; int signaled; } k_events[] = {
     { "am:IApplicationFunctions", 130, 0 }, // GetGpuErrorDetectedSystemEvent
+    { "nfp:IUser", 17, 0 },                 // AttachActivateEvent
+    { "nfp:IUser", 18, 0 },                 // AttachDeactivateEvent
+    { "nfp:IUser", 23, 0 },                 // AttachAvailabilityChangeEvent
+    { "aud:IAudioRenderer", 7, 1 },         // QuerySystemEvent (signalled: the host renderer is always ready)
     { "am:ISelfController", 91, 0 },        // GetAccumulatedSuspendedTickChangedEvent
     { "am:ISelfController", 1, 0 },         // (Switch 1) LockExit-related event
     { "am:ICommonStateGetter", 61, 0 },     // GetDefaultDisplayResolutionChangeEvent
@@ -496,6 +505,12 @@ static void handle_request(request_t *q, reply_t *r)
         static const uint32_t params[3] = { 10, 0, 0 };
         r->data_size = sizeof params;
         memcpy(r->data, params, sizeof params);
+        return;
+    }
+    if (!strcmp(q->iface, "aud:IAudioRendererManager") && q->cmd == 1) { // GetWorkBufferSize
+        // The renderer runs on the host, so the guest work buffer is never used; any
+        // page-aligned size the SDK accepts will do.
+        reply_u64(r, 0x10000);
         return;
     }
     if (!strcmp(q->iface, "am:IWindowController") && q->cmd == 1) { // GetAppletResourceUserId
