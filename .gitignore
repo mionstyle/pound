@@ -8,3 +8,6 @@ docs/cdoc
 /.vs
 /compile_commands.json
 imgui.ini
+
+# Python
+__pycache__/
