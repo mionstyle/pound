@@ -11,6 +11,7 @@
 #include "host.h"
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -187,9 +188,11 @@ _Noreturn void kernel_run_main_thread(guest_thread_t *t)
 
 // ---- blocking ------------------------------------------------------------------
 
+static clockid_t g_wait_clock = CLOCK_REALTIME; // clock used by KC's timed waits
+
 static void deadline_after(struct timespec *d, int64_t ns)
 {
-    clock_gettime(CLOCK_MONOTONIC, d);
+    clock_gettime(g_wait_clock, d);
     d->tv_sec += ns / 1000000000;
     d->tv_nsec += ns % 1000000000;
     if (d->tv_nsec >= 1000000000) { d->tv_sec++; d->tv_nsec -= 1000000000; }
@@ -301,7 +304,8 @@ void kernel_init(uint64_t program_id)
     g_program_id = program_id;
     pthread_condattr_t ca;
     pthread_condattr_init(&ca);
-    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    if (pthread_condattr_setclock(&ca, CLOCK_MONOTONIC) == 0)
+        g_wait_clock = CLOCK_MONOTONIC; // not available everywhere (e.g. winpthreads)
     pthread_cond_init(&KC, &ca);
 }
 

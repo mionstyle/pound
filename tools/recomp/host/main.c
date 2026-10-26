@@ -7,9 +7,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <signal.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <execinfo.h>
+#include <signal.h>
 #include <unistd.h>
+#endif
 
 int host_verbose;
 static struct timespec t0;
@@ -72,15 +76,32 @@ static uint64_t read_npdm(const char *dir, uint32_t *stack_size, int *prio, int 
     return pid;
 }
 
-static void on_segv(int sig, siginfo_t *si, void *uc)
+static void report_fault(uint8_t *a)
 {
-    (void)uc;
-    uint8_t *a = si->si_addr;
     if (a >= recomp_mem_base && a < recomp_mem_base + (1ull << GUEST_ADDR_BITS))
         printf("FATAL: guest memory fault at guest address 0x%llx (%s)\n",
                (unsigned long long)(a - recomp_mem_base), addr_describe((uint64_t)(a - recomp_mem_base)));
     else
-        printf("FATAL: host signal %d at host address %p\n", sig, (void *)a);
+        printf("FATAL: host fault at host address %p\n", (void *)a);
+}
+
+#ifdef _WIN32
+static LONG WINAPI on_exception(EXCEPTION_POINTERS *e)
+{
+    if (e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+        report_fault((uint8_t *)e->ExceptionRecord->ExceptionInformation[1]);
+    else
+        printf("FATAL: host exception 0x%lx\n", (unsigned long)e->ExceptionRecord->ExceptionCode);
+    fflush(stdout);
+    ExitProcess(4);
+}
+
+static void install_fault_handler(void) { SetUnhandledExceptionFilter(on_exception); }
+#else
+static void on_segv(int sig, siginfo_t *si, void *uc)
+{
+    (void)uc; (void)sig;
+    report_fault(si->si_addr);
     void *bt[24];
     int   n = backtrace(bt, 24);
     backtrace_symbols_fd(bt, n, 1);
@@ -88,19 +109,23 @@ static void on_segv(int sig, siginfo_t *si, void *uc)
     _exit(4);
 }
 
+static void install_fault_handler(void)
+{
+    static uint8_t   altstack[1 << 16];
+    stack_t          ss = { .ss_sp = altstack, .ss_size = sizeof altstack };
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sigaltstack(&ss, NULL);
+    sa.sa_sigaction = on_segv;
+    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+}
+#endif
+
 int main(int argc, char **argv)
 {
-    {
-        static uint8_t   altstack[1 << 16];
-        stack_t          ss = { .ss_sp = altstack, .ss_size = sizeof altstack };
-        struct sigaction sa;
-        memset(&sa, 0, sizeof sa);
-        sigaltstack(&ss, NULL);
-        sa.sa_sigaction = on_segv;
-        sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
-        sigaction(SIGSEGV, &sa, NULL);
-        sigaction(SIGBUS, &sa, NULL);
-    }
+    install_fault_handler();
     clock_gettime(CLOCK_MONOTONIC, &t0);
     setvbuf(stdout, NULL, _IOLBF, 0);
     int a = 1;

@@ -6,7 +6,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/mman.h>
+#endif
+
+// ---- host virtual memory -------------------------------------------------------
+#ifdef _WIN32
+static void *os_reserve(uint64_t size) { return VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS); }
+static int   os_commit(void *p, uint64_t size) { return VirtualAlloc(p, size, MEM_COMMIT, PAGE_READWRITE) ? 0 : -1; }
+static void  os_decommit(void *p, uint64_t size) { VirtualFree(p, size, MEM_DECOMMIT); }
+#else
+static void *os_reserve(uint64_t size)
+{
+    void *p = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    return p == MAP_FAILED ? NULL : p;
+}
+static int  os_commit(void *p, uint64_t size) { return mprotect(p, size, PROT_READ | PROT_WRITE); }
+static void os_decommit(void *p, uint64_t size)
+{
+    madvise(p, size, MADV_DONTNEED);
+    mprotect(p, size, PROT_NONE);
+}
+#endif
 
 uint8_t *recomp_mem_base;
 
@@ -22,8 +45,8 @@ static int      region_count;
 
 int mem_init(void)
 {
-    void *p = mmap(NULL, 1ull << GUEST_ADDR_BITS, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (p == MAP_FAILED)
+    void *p = os_reserve(1ull << GUEST_ADDR_BITS);
+    if (!p)
         return -1;
     recomp_mem_base = p;
     return 0;
@@ -98,7 +121,7 @@ int mem_map(uint64_t addr, uint64_t size, uint32_t state, uint32_t perm)
         return -1;
     if (!mem_is_free(addr, size))
         return -2;
-    if (mprotect(recomp_mem_base + addr, size, PROT_READ | PROT_WRITE) != 0)
+    if (os_commit(recomp_mem_base + addr, size) != 0)
         return -3;
     if (region_count >= MAX_REGIONS)
         host_fatal("too many memory regions");
@@ -124,8 +147,7 @@ int mem_unmap(uint64_t addr, uint64_t size)
         ++i;
     }
     sort_regions();
-    madvise(recomp_mem_base + addr, size, MADV_DONTNEED);
-    mprotect(recomp_mem_base + addr, size, PROT_NONE);
+    os_decommit(recomp_mem_base + addr, size);
     return 0;
 }
 
