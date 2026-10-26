@@ -9,7 +9,7 @@ set -euo pipefail
 IN=$1
 OUT=$2
 R=$(cd "$(dirname "$0")/.." && pwd)
-JOBS=$(nproc)
+JOBS=${JOBS:-$(nproc)}
 mkdir -p "$OUT"
 CFLAGS="${CFLAGS:--O1} -fPIC -fno-strict-aliasing -w -I$R/runtime"
 
