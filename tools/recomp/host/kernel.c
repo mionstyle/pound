@@ -386,7 +386,7 @@ static void svc_get_info(cpu_t *c)
     case 3: out = ALIAS_REGION_SIZE; break;
     case 4: out = HEAP_REGION_BASE; break;
     case 5: out = HEAP_REGION_SIZE; break;
-    case 6: out = 0x1C0000000ull; break;                    // total memory available to the application
+    case 6: out = APP_MEMORY_SIZE; break;                   // total memory available to the application
     case 7: out = mem_used_total(); break;                  // used memory
     case 8: out = 0; break;                                 // debugger attached
     case 9: out = handle_alloc(H_RESOURCE_LIMIT, NULL, 0, 0); break;
@@ -400,7 +400,7 @@ static void svc_get_info(cpu_t *c)
     case 17: out = 0; break;
     case 18: out = g_program_id; break;
     case 20: out = g_current->tls + 0x100; break;           // user exception context
-    case 21: out = 0x1C0000000ull; break;
+    case 21: out = APP_MEMORY_SIZE; break;
     case 22: out = mem_used_total(); break;                 // used non-system memory
     case 23: out = 1; break;                                // is application
     case 24: out = 64; break;                               // free thread count

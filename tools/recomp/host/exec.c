@@ -368,8 +368,10 @@ void recomp_resume(cpu_t *c, uint64_t pc, uint64_t lr)
     from_uc(c);
     uint64_t end;
     uc_reg_read(uc, UC_ARM64_REG_PC, &end);
-    if (e != UC_ERR_OK || end != lr)
+    if (e != UC_ERR_OK || end != lr) {
+        guest_backtrace(c);
         host_fatal("interpreter (resume) stopped at %s: %s", addr_describe(end), uc_strerror(e));
+    }
     leave();
     if (g_prof_on == 1)
         prof_add(pc | 1, now_ns() - t0); // odd address marks a resume point

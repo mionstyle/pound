@@ -51,8 +51,25 @@ typedef struct
     int      is_sm;
     int      is_domain;
     int      object;          // non-domain: the object this session talks to
-    int      domain[64];      // domain: object ids (index = domain object id)
+    int     *domain;          // domain: object ids (index = domain object id), shared by clones
 } session_t;
+
+// Domains live apart from sessions: sessions cloned from a domain session (CloneCurrentObject)
+// talk to the same domain, so objects created through one are visible through the others.
+#define MAX_DOMAINS 256
+static int g_domains[MAX_DOMAINS][64];
+static int g_domain_used[MAX_DOMAINS];
+
+static int *domain_new(void)
+{
+    for (int i = 0; i < MAX_DOMAINS; ++i)
+        if (!g_domain_used[i]) {
+            g_domain_used[i] = 1;
+            memset(g_domains[i], 0, sizeof g_domains[i]);
+            return g_domains[i];
+        }
+    host_fatal("too many IPC domains");
+}
 
 #define MAX_SESSIONS 512
 static session_t sessions[MAX_SESSIONS];
@@ -673,6 +690,7 @@ static uint32_t handle_control(session_t *s, uint64_t msg, hipc_msg_t *m, uint32
     switch (cmd) {
     case 0: // ConvertCurrentObjectToDomain -> object id
         s->is_domain = 1;
+        s->domain    = domain_new();
         s->domain[1] = s->object;
         reply_u32(&r, 1);
         break;
@@ -682,7 +700,7 @@ static uint32_t handle_control(session_t *s, uint64_t msg, hipc_msg_t *m, uint32
         if (s->is_domain) {
             session_t *n = session_get(r.move[0]);
             n->is_domain = 1;
-            memcpy(n->domain, s->domain, sizeof n->domain);
+            n->domain    = s->domain; // same domain, not a copy
         }
         break;
     case 3: // QueryPointerBufferSize -> u16

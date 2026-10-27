@@ -33,6 +33,10 @@ extern int host_verbose;
 #define CODE_BASE         0x0000008000000ull
 #define HEAP_REGION_BASE  0x1000000000ull
 #define HEAP_REGION_SIZE  0x1000000000ull
+// Memory the application may use (GetInfo 6 / 21). DKB's HeapDef budgets ~7 GB of fixed
+// heaps plus "rest of memory" heaps, so a Switch 2 sized pool is needed. Host memory is
+// committed on demand, so this costs nothing until used.
+#define APP_MEMORY_SIZE   0x280000000ull
 #define ALIAS_REGION_BASE 0x2000000000ull
 #define ALIAS_REGION_SIZE 0x1000000000ull
 #define STACK_REGION_BASE 0x3000000000ull

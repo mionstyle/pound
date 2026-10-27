@@ -229,6 +229,14 @@ static void pool_builder_SetStorage(cpu_t *c) // (builder, void* memory, size_t 
 static void pool_Initialize(cpu_t *c) // (pool, builder) -> bool
 {
     prop_copy_all(A(1), A(0));
+    static uint64_t total, count;
+    uint64_t size = prop_get(A(0), "Storage", 1);
+    total += size;
+    ++count;
+    if (getenv("RECOMP_NVN_TRACE") || size >= (64u << 20))
+        host_log("nvn: memory pool #%llu: 0x%llx bytes at 0x%llx flags 0x%llx (total %llu MB)", (unsigned long long)count,
+                 (unsigned long long)size, (unsigned long long)prop_get(A(0), "Storage", 0),
+                 (unsigned long long)prop_get(A(0), "Flags", 0), (unsigned long long)(total >> 20));
     RET(1);
 }
 
@@ -290,18 +298,36 @@ static uint64_t format_bpp(uint64_t f)
     return 16;                                             // RGBA32*
 }
 
+// Block-compressed formats: bytes per 4x4 block (0 = not compressed). ASTC (ids above 80)
+// is counted as 4x4 blocks, an upper bound for every ASTC block size.
+static uint64_t format_block_bytes(uint64_t f)
+{
+    if (f == 65 || f == 66 || f == 69 || f == 70 || f == 73 || f == 74) return 8;  // BC1, BC4
+    if (f >= 65) return 16;                                                    // BC2/3/5/6/7, ASTC
+    return 0;
+}
+
+// Storage of a texture: the whole mip chain, packed, rounded to 512 bytes. The real driver
+// uses block-linear tiling with similar padding; the game sizes its graphics heaps from
+// these values, so they must not be much larger than on hardware.
 static void tex_builder_GetStorageSize(cpu_t *c)
 {
     uint64_t w = prop_get(A(0), "Size", 0), h = prop_get(A(0), "Size", 1), d = prop_get(A(0), "Size", 2);
+    uint64_t levels = prop_get(A(0), "Levels", 0), f = prop_get(A(0), "Format", 0);
     if (!w) w = 1;
     if (!h) h = 1;
     if (!d) d = 1;
-    uint64_t size = w * h * d * format_bpp(prop_get(A(0), "Format", 0));
-    size += size / 3 + 0x1000; // mip chain and tiling padding
-    RET((size + 0xFFFF) & ~0xFFFFull);
+    if (!levels || levels > 16) levels = 1;
+    uint64_t size = 0, block = format_block_bytes(f), bpp = format_bpp(f);
+    for (uint64_t l = 0; l < levels; ++l) {
+        uint64_t lw = w >> l ? w >> l : 1, lh = h >> l ? h >> l : 1;
+        uint64_t bytes = block ? ((lw + 3) / 4) * ((lh + 3) / 4) * block : lw * lh * bpp;
+        size += (bytes + 0x1FF) & ~0x1FFull;
+    }
+    RET(size * d);
 }
 
-static void tex_builder_GetStorageAlignment(cpu_t *c) { RET(0x10000); }
+static void tex_builder_GetStorageAlignment(cpu_t *c) { RET(0x200); }
 
 static void tex_builder_SetStorage(cpu_t *c) // (builder, pool, offset)
 {
