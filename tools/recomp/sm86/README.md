@@ -12,7 +12,17 @@ to Vulkan GLSL ahead of time.
   header (byte 0: 0x81 vertex, 0x82 fragment; word 0x48: fragment output mask), then code.
   Compute programs have no header.
 - `batch.py <dump dir> <out dir> [glslangValidator]`: translate every captured program and
-  compile it to SPIR-V; prints coverage.
+  compile it to SPIR-V; prints coverage. The out dir is the renderer's shader cache
+  (`$RECOMP_SPV_DIR`): `<hash>.<vert|frag|comp>.spv` plus `<hash>.res`, a line-based
+  resource description (`cbuf <bank> <bytes>`, `tex <bank> <offset> <glsl type> <binding>`,
+  `in <location>`, `out <location>`, `gmem`).
+
+Vertex shaders end with the NVN depth-mode conversion (clip z from -w..w to 0..w), switched
+by specialization constant 10 (`DEPTH_MINUS_ONE`, on by default; DKB uses depth mode 0).
+
+Resource mapping confirmed on DKB with the renderer (host/vk/draw.c): uniform buffer i of a
+stage is constant bank i + 3 (as NVN1); bank 2 holds the stage's texture handles, texture i
+at c[2][0x20 + 8 * i].
 
 Capture: run the host with `RECOMP_SHADER_DUMP=<dir>`; every program the game creates is
 written as `<fnv64 of first 1 KB>.code` (64 KB window) and `.ctrl` (control section).

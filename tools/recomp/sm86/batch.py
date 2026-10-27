@@ -2,6 +2,9 @@
 """Translates every captured shader and compiles the GLSL with glslangValidator.
 
 batch.py <dump dir> <out dir> [glslangValidator]   -> coverage report on stdout
+
+The out dir is the host renderer's shader cache ($RECOMP_SPV_DIR): for each program that
+compiles, <hash>.<vert|frag|comp>.spv and <hash>.res (resources, see Translator.resources_text).
 """
 import collections, glob, os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +31,7 @@ for f in sorted(glob.glob(os.path.join(src, '*.code'))):
     r = subprocess.run([glslang, '-V', '--target-env', 'vulkan1.2', '-o', path + '.spv', path], capture_output=True, text=True)
     if r.returncode == 0:
         stats[t.kind + ' ok'] += 1
+        open(os.path.join(out, h + '.res'), 'w').write(t.resources_text())
     else:
         stats[t.kind + ' compile error'] += 1
         msg = [l for l in r.stdout.splitlines() if 'ERROR' in l]

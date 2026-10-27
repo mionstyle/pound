@@ -1001,7 +1001,16 @@ class Translator:
             for t in self.frag_targets():
                 L.append('    o%d = vec4(%s);' % (t, ', '.join('uintBitsToFloat(r%d)' % (4 * t + c) for c in range(4))))
             L.append('}')
-        L.append('void main() {')
+        if self.kind == 'vertex':
+            # NVN's default depth mode maps clip z from -w..w (OpenGL); Vulkan uses 0..w. The
+            # renderer turns the conversion off (constant 10 = false) for NEAR_IS_ZERO.
+            L.append('layout(constant_id = 10) const bool DEPTH_MINUS_ONE = true;')
+            L.append('void vmain();')
+            L.append('void main() {')
+            L.append('    vmain();')
+            L.append('    if (DEPTH_MINUS_ONE) gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;')
+            L.append('}')
+        L.append('void vmain() {' if self.kind == 'vertex' else 'void main() {')
         if self.kind == 'vertex':
             L.append('    gl_Position = vec4(0.0);')
         L.append('    uint pc = 0x%xu;' % (self.insts[0].off if self.insts else 0))
@@ -1030,7 +1039,20 @@ class Translator:
                          for k, ((b, o), t) in enumerate(sorted(self.textures.items()))],
             'inputs': sorted(self.inputs if self.kind == 'vertex' else self.frag_inputs),
             'outputs': sorted(self.outputs) if self.kind == 'vertex' else self.frag_targets(),
+            'gmem': 'gmem' in self.need,
         }
+
+    def resources_text(self):
+        """The resource description in the line format the host renderer reads (<hash>.res)."""
+        r = self.resources()
+        L = ['stage %s' % r['stage']]
+        L += ['cbuf %s %d' % (b, n) for b, n in r['cbufs'].items()]
+        L += ['tex %d %d %s %d' % (t['bank'], t['offset'], t['type'], t['binding']) for t in r['textures']]
+        L += ['in %d' % a for a in r['inputs']]
+        L += ['out %d' % o for o in r['outputs']]
+        if r['gmem']:
+            L.append('gmem')
+        return '\n'.join(L) + '\n'
 
 
 def main(argv):

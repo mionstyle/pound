@@ -10,10 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void dump_ppm(const uint32_t *rgba, int w, int h, uint64_t frame)
+int present_dump_wanted(uint64_t frame)
 {
     const char *dir = getenv("RECOMP_DUMP_FRAMES");
-    if (!dir || !*dir || frame % 60 != 1)
+    return dir && *dir && frame % 60 == 1;
+}
+
+void present_dump(const uint32_t *rgba, int w, int h, uint64_t frame)
+{
+    const char *dir = getenv("RECOMP_DUMP_FRAMES");
+    if (!present_dump_wanted(frame))
         return;
     char path[1024];
     snprintf(path, sizeof path, "%s/frame_%06llu.ppm", dir, (unsigned long long)frame);
@@ -39,16 +45,21 @@ static void dump_ppm(const uint32_t *rgba, int w, int h, uint64_t frame)
 #ifdef _WIN32
 #include <windows.h>
 
-static HWND             g_wnd;
+static HWND volatile    g_wnd;
 static CRITICAL_SECTION g_lock;
 static uint32_t        *g_pixels; // BGRA copy of the last frame
 static int              g_w, g_h;
 static volatile LONG    g_started;
+static volatile LONG    g_gpu; // a GPU backend owns the window's contents
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_PAINT: {
+        if (g_gpu) {
+            ValidateRect(h, NULL);
+            return 0;
+        }
         PAINTSTRUCT ps;
         HDC         dc = BeginPaint(h, &ps);
         RECT        rc;
@@ -103,12 +114,27 @@ static DWORD WINAPI window_thread(LPVOID arg)
 
 int present_has_focus(void) { return g_wnd && GetForegroundWindow() == g_wnd; }
 
-void present_frame(const uint32_t *rgba, int w, int h, uint64_t frame)
+static void start_window(void)
 {
     if (InterlockedExchange(&g_started, 1) == 0) {
         InitializeCriticalSection(&g_lock);
         CreateThread(NULL, 0, window_thread, NULL, 0, NULL);
     }
+}
+
+void *present_window(void)
+{
+    start_window();
+    for (int i = 0; i < 500 && !g_wnd; ++i) // up to 5 s for the window thread
+        Sleep(10);
+    return g_wnd;
+}
+
+void present_set_gpu(int on) { InterlockedExchange(&g_gpu, on); }
+
+void present_frame(const uint32_t *rgba, int w, int h, uint64_t frame)
+{
+    start_window();
     EnterCriticalSection(&g_lock);
     if (w != g_w || h != g_h) {
         free(g_pixels);
@@ -123,9 +149,11 @@ void present_frame(const uint32_t *rgba, int w, int h, uint64_t frame)
     LeaveCriticalSection(&g_lock);
     if (g_wnd)
         InvalidateRect(g_wnd, NULL, FALSE);
-    dump_ppm(rgba, w, h, frame);
+    present_dump(rgba, w, h, frame);
 }
 #else
 int  present_has_focus(void) { return 0; }
-void present_frame(const uint32_t *rgba, int w, int h, uint64_t frame) { dump_ppm(rgba, w, h, frame); }
+void *present_window(void) { return NULL; }
+void present_set_gpu(int on) { (void)on; }
+void present_frame(const uint32_t *rgba, int w, int h, uint64_t frame) { present_dump(rgba, w, h, frame); }
 #endif

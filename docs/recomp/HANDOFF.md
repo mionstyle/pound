@@ -24,7 +24,9 @@ by a host runtime (high-level emulation, like the Switch 1 "LAS Recomp" project)
 | `tools/recomp/host/` | the runtime: `memory.c loader.c exec.c kernel.c ipc.c romfs.c savefs.c hle*.c present.c input.c main.c` |
 | `tools/recomp/host/build_modules.sh` | translate + compile rtld/sdk/main into `librecomp_<m>.a` |
 | `tools/recomp/host/build_host.sh` | link Linux test binary |
-| `tools/recomp/host/build_windows.sh` | cross-compile Windows .exe with llvm-mingw (resumable) |
+| `tools/recomp/host/renderer.h`, `host/vk/` | GPU renderer interface and its Vulkan backend (Windows): `device.c` (device, swapchain, frames, present), `textures.c` (images), `draw.c` (pipelines, draws) |
+| `tools/recomp/host/build_windows.sh` | Windows .exe with llvm-mingw: cross (Linux) or native (Git Bash on Windows); resumable |
+| `tools/recomp/sm86/` | SM86 shader -> GLSL translator; `batch.py` builds the renderer's SPIR-V cache |
 | `tools/recomp/pack-romfs.ps1` | (owner's PC) split RomFS folders into zips < 400 MB |
 | `docs/recomp/dkb-analysis.md`, `dkb-nvn2-procs.txt` | analysis notes, the 726 NVN2 procs the game requests |
 
@@ -43,11 +45,44 @@ RECOMP_SAVE_DIR=save ./rr_full [-v|-vv] <exefs dir> <romfs dir>
 OPT=-O0 host/build_windows.sh gen/ win/ rtld sdk main               # ~hours on 2 cores
 ```
 
-Useful environment variables: `RECOMP_SAVE_DIR` (save data dir), `RECOMP_AUTO_PRESS=<n>`
+Useful environment variables: `RECOMP_SPV_DIR` (shader cache, default `spv`), `RECOMP_GPU=0`
+(no Vulkan: CPU clears + GDI), `RECOMP_VK_VALIDATION=1`, `RECOMP_DRAW_LOG=<n>` (first n draws in
+full), `RECOMP_VK_DEBUG_FILL=1` (new images start in a colour picked from their address),
+`RECOMP_NVN_LOG=<text>` (calls of generic NVN procs whose name contains text),
+`RECOMP_NVN_LOG_BINDS=1`, `RECOMP_HLE_STATS=<n>` (HLE call statistics at frame 120),
+`RECOMP_SAVE_DIR` (save data dir), `RECOMP_AUTO_PRESS=<n>`
 (tap A every n polls, headless), `RECOMP_DUMP_FRAMES=<dir>` (PPM of presented frames),
 `RECOMP_PROFILE=1` (interpreter profile every 300 frames), `RECOMP_NVN_TRACE=1`,
 `RECOMP_IPC_TRACE=1`, `RECOMP_BLOCK_DISPATCH=1` (experimental, see open problems),
 `RECOMP_WATCH=main+0x...` (dump words at Break). `-v` logs RomFS reads / IPC; `-vv` every SVC.
+
+## Building on the owner's PC (Windows, native; set up 2026-10-27)
+
+Tools live in `C:\Users\leozi\deps`: `llvm-mingw-20240619-ucrt-x86_64` (clang 18.1.8),
+`unicorn-2.1.3` (source, for the headers), `unicorn-win` (`libunicorn.dll` from the cloud build
++ `libunicorn.dll.a` made with `gendef` / `llvm-dlltool`, + `libwinpthread-1.dll`),
+`lasrecomp` (sparse clone of LAS Recomp's `runtime/nvn`, for reference). Python 3.12 has
+`pip install capstone` (5.0.7). The LunarG Vulkan SDK 1.4.363 is installed (`$VULKAN_SDK`:
+headers, `vulkan-1.lib`, `glslangValidator`). GPU: RTX 4070 (Vulkan 1.4 driver).
+Work dir: `C:\Users\leozi\Desktop\NSW2 recomp` (`pound` = this repo, `work` = build outputs:
+`bins/` NSO images, `gen/` C, `win/` exe + objects, `spv/` shader cache).
+From Git Bash, in `work`:
+
+```
+D=/c/Users/leozi/Downloads/DonkeyKongBananza/DonkeyKongBananza/updates/458752
+bin/nso_info.exe $D/exefs/main bins/main.bin                  # same for sdk, rtld
+python ../pound/tools/recomp/recomp.py bins/main.bin --out gen/main --prefix main \
+    --no-comments --per-file 400 --stats > gen/main.stats     # ~3 min; run the 3 in parallel
+export MINGW=/c/Users/leozi/deps/llvm-mingw-20240619-ucrt-x86_64 UNICORN_SRC=/c/Users/leozi/deps/unicorn-2.1.3 \
+       UNICORN_WIN=/c/Users/leozi/deps/unicorn-win            # VULKAN_SDK is set by the SDK installer
+bash ../pound/tools/recomp/host/build_windows.sh gen win rtld sdk main   # -O1: ~3 min on 16 threads
+cd win && RECOMP_SAVE_DIR=save RECOMP_SHADER_DUMP=shaders ./recomp_run.exe $D/exefs $D/romfs > run.log 2>&1
+cd .. && python ../pound/tools/recomp/sm86/batch.py win/shaders spv "$VULKAN_SDK/Bin/glslangValidator.exe"
+cd win && RECOMP_SAVE_DIR=save RECOMP_SPV_DIR=../spv ./recomp_run.exe $D/exefs $D/romfs > run.log 2>&1
+```
+
+Delete `win/obj/librecomp_<m>.a` (and `win/obj/<m>/`) to force a module rebuild; host
+changes only relink (seconds). Runs open the game window; `timeout <s>` bounds test runs.
 
 ## Game data
 
@@ -89,7 +124,27 @@ as zips the owner creates with `pack-romfs.ps1`.
 7. Windows: `build_windows.sh <gen> <out> rtld sdk main` builds a 347 MB `recomp_run.exe`
    (zip ~76 MB, sent to the owner as `recomp-win.zip`, not yet tested on Windows).
 
+8. (2026-10-27, owner's PC) Native Windows build works (`recomp_run.exe` 168 MB at -O1) and
+   runs the real dump. Vulkan renderer started (`host/vk/`, adapted from LAS Recomp): device
+   and swapchain on the game window (RTX 4070), one VkImage per guest texture, clears and
+   presents on the GPU (window crop honoured; `RECOMP_DUMP_FRAMES` reads frames back), and
+   draws: command buffers record the full draw state (`hle_nvn.c`: program, vertex buffers /
+   attribute / stream states, uniform / storage buffers, textures, pools, viewport, scissor,
+   depth range, state objects, `UpdateUniformBuffer`), executed at present / `nvnQueueFinish`
+   (deferred, like a GPU running behind). `vk/draw.c` builds pipelines from the sm86 SPIR-V
+   cache and draws. Verified on the frame blit of the title stage: vertex data, matrix from
+   `UpdateUniformBuffer`, source texture from the texture pool (`RECOMP_VK_DEBUG_FILL=1` shows
+   the quad landing in the window texture); no validation errors.
+   Findings: uniform buffer i = cbuf bank i + 3; texture i's handle at c[2][0x20 + 8 i]; window
+   origin mode 1 (upper left: no flips needed), depth mode 0 (z from -w..w, converted in the
+   vertex shader); NVN2 state objects keep the NVN1 sizes (vertex attrib 4 bytes, stream 8)
+   and are configured through procs the generic fallback records as properties (the guest
+   structs stay zero); window textures are 2880x1620 with a 1920x1080 crop.
+
 ## Plan (agreed 2026-10-27): move the work to the owner's PC
+
+Steps 1 and 2 are done (see "Building on the owner's PC"); step 3 is under way (status 8 and
+"Next steps for the renderer").
 
 The renderer needs a real GPU, so development moves to the owner's Windows PC through the
 desktop app's device shell (when `device_bash` is available), keeping the cloud for GitHub,
@@ -140,12 +195,33 @@ LAS Recomp (his BotW port) into a new project for FE on Switch 2.
   - the memory budget had to be raised (6 GiB for FE; DKB needs 10 GB, see above).
 - His recipe in short: dump a game, use IDA/Ghidra, start from LAS Recomp.
 
+## Next steps for the renderer (in order)
+
+1. Only one draw per frame is executed at the title stage: the main thread submits one
+   list per frame (37 ops, the frame blit). Worker threads (0x12c..0x130) record a list per
+   frame (15 ops, 1 draw) on command buffers 0x30....bd8 that are never submitted nor called
+   (`RECOMP_LIST_TRACE=1` shows it). Those same command buffers get NVN2's
+   `nvnCommandBufferSetRecordingMode(cmdbuf, mode 0/1, offset, 0xc00000, flags)` around 6
+   times a frame, with offsets stepping by 0xc00000 (a triple-buffered 12 MB ring): the
+   recording mode presumably makes them record into memory the main command buffer runs.
+   Next: reverse that proc's semantics (Ghidra on the game's callers / the NVN2 driver in
+   sdk), then execute those lists at the right place. (Also fixed: recorder slots are freed
+   at `nvnCommandBufferFinalize`; not the cause.)
+2. Guest texture uploads: textures the CPU fills (RomFS data) need a copy from guest memory
+   with T239 block-linear deswizzling (LAS Recomp `tegra.c`; the byte order differs from
+   Switch 1) and BCn/ASTC formats; samplers from `nvnSamplerPoolRegisterSampler`.
+3. Stencil state, culling convention with the upper-left origin (`RECOMP_VK_CULL=1` to test),
+   guest memory for LDG shaders (gmem binding 17; LAS imports the guest heap), compute
+   dispatches, multi-layer / mip views, MSAA, queries / `ReportCounter`, events.
+4. Performance: images keyed by storage address (aliasing), fewer barriers, pipeline cache
+   on disk, a render thread.
+
 ## Open problems / next steps
 
 1. Translator gaps: I2F sizes, TMML, TLD4, SHFL, F2FP/HADD2, PLOP3 with uniform preds, a
    texture used with two sampler types, compute shaders (32/36 fail).
-2. Unknown yet: vertex attribute -> vertex buffer mapping, which cbuf bank holds the game's
-   uniform buffers, vertex output -> fragment varying mapping (assumed generic index i).
+2. Unknown yet: vertex output -> fragment varying mapping (assumed generic index i), what
+   banks 0/1 hold (zeros are bound for now).
 3. Speed: main at -O1; NEON/SIMD in the CPU translator; `RECOMP_BLOCK_DISPATCH=1` (runs
    compiled functions entered from the interpreter) still hangs after ~100 s — bisect with
    `RECOMP_BLOCK_MOD=m:r`.
