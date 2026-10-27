@@ -108,6 +108,38 @@ the translator and GPU-less work.
    workgroup size at control +0x58, T239 block-linear tile byte order differs from Switch 1,
    DLSS stubbed as a plain upscale). First goal: the title menu drawn.
 
+## Reference: how another Switch 2 port did it (Fire Emblem: Fortune's Weave)
+
+Shared by its author ("Jacob") in a chat; his code is private, these are his notes. He forked
+LAS Recomp (his BotW port) into a new project for FE on Switch 2.
+
+- **Spotting Switch 2 shaders.** In `objects.c` (set_shaders), a blob without the Maxwell
+  magic (0x12345678) is a Switch 2 shader. Tag 0x81 = vertex, 0x82 = fragment, anything else
+  = compute; code starts at +0x80. Instructions are 128-bit (Ampere style), which
+  `maxwell_translate` cannot decode. (Matches what we found in DKB.)
+- **Ahead-of-time translation, not live.** Shaders from gameplay are dumped
+  (`FE_SHADER_CAPTURE_DIR`, plus compute shaders that failed) and translated by Python tools:
+  `sm86_fragment_glsl.py` (shared emitter), `sm86_vertex_glsl.py`, `sm86_compute.py`;
+  `sm86_cache.py` builds the cache: GLSL plus a resource list per program, keyed by an
+  FNV-1a hash of the whole program. On FE's prologue dialogue set: 56/56 vertex, 96/98
+  fragment, 20/20 compute programs translate and compile.
+- **Loading at runtime.** With `FE_SCENE_SM86_CACHE` set, the cache lookup (`s2_sm86_cache`,
+  LAS `vulkan/exec.c`) is tried first in `translate_program` for draws and in the compute
+  path. It must stand in for Switch 2 driver behaviour that LAS never modelled:
+  - texture handles held in registers, served from a shared texture pool (descriptor set 2);
+  - a rebuilt compute constant bank 0 (`s2_compute_bank0`);
+  - the compute workgroup size, read from the program's control section at +0x58;
+  - small storage buffers copied when commands are recorded.
+  `device.c` enables the extra Vulkan features these programs need.
+- **Fallbacks.** If a program is not in the cache, `translate_program` walks hand-written
+  per-hash shaders (`s2_*_probe`, `s2_sm86_*`, headers `vulkan/sm86_*.h`), then
+  `maxwell_translate` (which cannot handle SM86).
+- **Other Switch 2 fixes outside shaders:**
+  - the T239 block-linear tile byte order differs from Switch 1 (fixed in LAS `tegra.c`);
+  - DLSS has a stub (`dlss.c`) that falls back to a plain upscale;
+  - the memory budget had to be raised (6 GiB for FE; DKB needs 10 GB, see above).
+- His recipe in short: dump a game, use IDA/Ghidra, start from LAS Recomp.
+
 ## Open problems / next steps
 
 1. Translator gaps: I2F sizes, TMML, TLD4, SHFL, F2FP/HADD2, PLOP3 with uniform preds, a
