@@ -61,34 +61,63 @@ Pack, Model, Tex, Sound minus Resource, Layout, ObjectData, Voxel minus Const, .
 Files are fetched through the desktop bridge (`device_stage_files`, 400 MB per file) or
 as zips the owner creates with `pack-romfs.ps1`.
 
-## Status (2026-10-26)
+## Status (2026-10-27)
 
 1. Boot: rtld/sdk/main load and relocate; Switch 2 GetInfo ids, sm/TIPC, am (incl. Switch 2
-   proxy objects 40/60, graphics supervisor), fs (RomFS, save data on a host dir), acc,
-   time, pctl, aoc, bcat (no cache), nifm (offline), hid (vibration list), aud (renderer
-   objects), stpl (streamplay), nfp.
+   proxy objects 40/60, graphics supervisor, graphics scaling params), fs (RomFS; save data in
+   a host dir, `savefs.c`), acc, time, pctl, aoc, bcat (no cache), nifm (offline), hid
+   (vibration list), aud (renderer objects), stpl (streamplay), nfp. Cloned IPC sessions share
+   their domain. App memory 10 GB (`APP_MEMORY_SIZE`, DKB heap budgets need > 7 GB).
 2. Graphics: `nv::InitializeGraphics` skipped; `nn::vi` on the host; NVN2 procs served by
-   `hle_nvn.c` (device info table, pools, buffers, textures, command lists recorded and run
-   at submit: render targets + clears; draws only counted). Window/PPM output of the
-   presented texture (black so far: the game only clears it and blits).
-3. Audio: `RequestUpdateAudioRenderer` answered on the host (no sound yet).
-4. Input: Npad No1 is a connected Pro Controller (`hle_hid.c` + `input.c`: keyboard and
-   XInput on Windows), six-axis at rest, ShowControllerSupport succeeds.
-5. Progress: title menu runs (frames presented); with `RECOMP_AUTO_PRESS` the game starts
-   loading the first level `GroundLevelStageScenario01` and then needs Phive, Voxel/Const,
-   Effect, ClusteredRendering (owner was asked to pack them with `pack-romfs.ps1 ... -Name lv`).
+   `hle_nvn.c` (device info table ids 0..97 in NVN1 order — DKB needs API 231.30; pools,
+   buffers, textures with per-format storage sizes, command lists recorded and run at submit:
+   render targets + clears; draws only counted). Win32 window / PPM dumps of presented frames
+   (black: nothing is drawn yet).
+3. Audio: `RequestUpdateAudioRenderer` answered on the host (no sound).
+4. Input: Npad No1 is a connected Pro Controller (`hle_hid.c`, `input.c`: keyboard + XInput on
+   Windows; `RECOMP_AUTO_PRESS` for headless), six-axis at rest.
+5. Progress (cloud, headless): title menu runs, then with auto-press the first level
+   `GroundLevelStage` loads and the opening demo (`DemoOpeningDonkeyAppear`) runs for 4000+
+   frames without crashing (~14 fps in the 2-core cloud container, main compiled at -O0).
+6. Shaders: `RECOMP_SHADER_DUMP=<dir>` captures every NVN2 program (2604 by the title menu).
+   `tools/recomp/sm86/` (see its README) translates SM86 code to Vulkan GLSL; 2247/2604 compile
+   with glslang. Findings: 0x80-byte header (tag 0x81 vertex / 0x82 fragment, word 0x48 =
+   fragment output mask), fragment outputs in R0..R3 per render target at EXIT; textures via
+   cbuf handles (bank 2, e.g. c[2][0x20]); driver constants in bank 3 (viewport scale) and
+   bank 0 (0x144: 64-bit global memory base used by LDG with UR4); Maxwell attribute space
+   (0x70 position, 0x80+16*i generic, 0x2fc vertex id, 0x3fc front facing).
+7. Windows: `build_windows.sh <gen> <out> rtld sdk main` builds a 347 MB `recomp_run.exe`
+   (zip ~76 MB, sent to the owner as `recomp-win.zip`, not yet tested on Windows).
+
+## Plan (agreed 2026-10-27): move the work to the owner's PC
+
+The renderer needs a real GPU, so development moves to the owner's Windows PC through the
+desktop app's device shell (when `device_bash` is available), keeping the cloud for GitHub,
+the translator and GPU-less work.
+1. On the PC: install llvm-mingw (ucrt, x86_64) and Python 3 (+ `pip install capstone`);
+   clone/copy the repo (a mirror lives in `C:\Users\leozi\Desktop\pound-recomp`); get
+   Unicorn's `libunicorn.dll` (build-win from the cloud, or build it). The bash build scripts
+   need Git Bash or a PowerShell port.
+2. Regenerate the C on the PC (`nso_info` on rtld/sdk/main, then `recomp.py` per module, as
+   `build_modules.sh` does) and build the .exe natively; run it against the real dump (no
+   sparse RomFS needed there).
+3. Renderer: port LAS Recomp's Vulkan backend (`runtime/nvn/vulkan/*`, `objects.c`,
+   `cmdbuf.c`, `tegra.c` — MIT licensed, github.com/peiikai/LASRecomp) onto `hle_nvn.c`;
+   use the sm86 translator (ahead-of-time cache keyed by program hash, like the Fire Emblem
+   port described by its author: texture handles from a shared pool, rebuilt compute cbuf 0,
+   workgroup size at control +0x58, T239 block-linear tile byte order differs from Switch 1,
+   DLSS stubbed as a plain upscale). First goal: the title menu drawn.
 
 ## Open problems / next steps
 
-1. Fetch the level data (`romfs-lv*.zip`), fix what breaks until the level runs.
-2. Windows `.exe` with main compiled (`build_windows.sh ... rtld sdk main`), test on the PC.
-3. Renderer (big): Vulkan backend; translate NVN2 shaders (SM86-class) to SPIR-V; start
-   with 2D/UI, then 3D. LAS Recomp and oboromi are references.
-4. Speed: compile main with -O1; translate NEON/SIMD (most remaining interpreter use);
-   fix the hang with `RECOMP_BLOCK_DISPATCH=1` (runs compiled functions entered from the
-   interpreter; it once ran a replaced function's real code, fixed by skipping HLE
-   addresses; a hang after ~100 s remains — bisect with `RECOMP_BLOCK_MOD=m:r`).
-5. Audio mixing on the host; real hid shared memory if needed.
+1. Translator gaps: I2F sizes, TMML, TLD4, SHFL, F2FP/HADD2, PLOP3 with uniform preds, a
+   texture used with two sampler types, compute shaders (32/36 fail).
+2. Unknown yet: vertex attribute -> vertex buffer mapping, which cbuf bank holds the game's
+   uniform buffers, vertex output -> fragment varying mapping (assumed generic index i).
+3. Speed: main at -O1; NEON/SIMD in the CPU translator; `RECOMP_BLOCK_DISPATCH=1` (runs
+   compiled functions entered from the interpreter) still hangs after ~100 s — bisect with
+   `RECOMP_BLOCK_MOD=m:r`.
+4. Audio mixing on the host.
 
 ## Working conventions
 
