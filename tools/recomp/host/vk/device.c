@@ -162,6 +162,8 @@ static int create_device(void)
     f.features.shaderInt64              = have.shaderInt64;
     f.features.fragmentStoresAndAtomics = have.fragmentStoresAndAtomics;
     f.features.independentBlend         = have.independentBlend;
+    // guest memory accesses (LDG / RED) may fall outside the buffer that stands in for it
+    f.features.robustBufferAccess       = have.robustBufferAccess;
     const char        *ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
     VkDeviceCreateInfo ci    = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                                  .pQueueCreateInfos = &qi, .enabledExtensionCount = 1, .ppEnabledExtensionNames = ext };
@@ -460,7 +462,10 @@ void rnd_present(const rnd_tex_t *t, const int32_t crop[4], uint64_t frame)
         sc_barrier(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
     int dump = src && present_dump_wanted(frame) && src->format == VK_FORMAT_R8G8B8A8_UNORM && readback_begin(src);
+    void vk_debug_frame_end(VkCommandBuffer cb), vk_debug_frame_done(void);
+    vk_debug_frame_end(vk_cmd());
     submit(image);
+    vk_debug_frame_done();
     if (dump)
         readback_end(src, frame);
     if (image >= 0) {
@@ -491,8 +496,11 @@ void rnd_clear_color(const rnd_tex_t *t, uint32_t mask, const float rgba[4])
             VK_LOG("clear with channel mask 0x%x done as a full clear", mask);
     }
     im->gpu_written = true;
+    void vk_debug_target_written(vk_image_t *im);
+    vk_debug_target_written(im);
     VkClearColorValue       v  = { { rgba[0], rgba[1], rgba[2], rgba[3] } };
-    VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, t->level < im->levels ? t->level : 0, 1,
+                                   t->layer < im->layers ? t->layer : 0, 1 };
     vkCmdClearColorImage(cb, im->image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &rg);
     vk_full_barrier(cb);
 }

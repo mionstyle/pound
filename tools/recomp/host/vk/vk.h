@@ -70,12 +70,24 @@ typedef struct
     VkImageAspectFlags aspect;
     bool               blit_src;   // the format supports vkCmdBlitImage as a source
     bool               attachment; // usable as a color / depth attachment
-    VkImageView        view;       // level 0, layer 0 (rendering and 2D sampling)
+    VkImageView        view;       // level 0, layer 0 (rendering)
     bool               gpu_written; // rendered into or cleared by the GPU at least once
+    uint32_t           levels, layers;
+    bool               cube;       // cube compatible (6+ square layers)
+    struct { uint32_t layer, level; VkImageView view; } views[16]; // other single layer / level views
+    int                nviews;
+    VkImageView        sample[3];  // sampling views: 2D, 2D array, cube (all levels)
+    // uploads from guest memory (textures.c)
+    bool               can_upload, uploaded;
+    uint64_t           checked_frame, data_hash, sample_hash;
 } vk_image_t;
 
 VkFormat    vk_format(uint32_t nvn_format);
 vk_image_t *vk_image_of(const rnd_tex_t *t); // created on first use (NULL: unsupported)
+VkImageView vk_image_view(vk_image_t *im, uint32_t layer, uint32_t level); // one layer / level (attachments)
+VkImageView vk_image_sample_view(vk_image_t *im, int kind); // 0 2D, 1 2D array, 2 cube; NULL if impossible
+void        vk_image_sync(vk_image_t *im);  // upload guest texels if they changed (not for GPU-written images)
+void        vk_textures_frame_begin(int slot);
 
 // ---- draw.c
 void     vk_draw_frame_begin(int slot); // the slot's previous frame completed: its transient memory is free

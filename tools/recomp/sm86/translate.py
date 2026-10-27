@@ -430,6 +430,61 @@ class Translator:
             return self.write(i.f(16, 24), 'floatBitsToUint(unpackHalf2x16(%s).x)' % s1)
         raise Unsupported('F2F %d<-%d' % (ds, ss))
 
+    # -- packed half ALU (HADD2 / HMUL2 / HFMA2). Each source is a half2 with its own swizzle:
+    # 0 = as is (H1_H0), 1 = the register holds an f32, 2 = H0_H0, 3 = H1_H1. Bit 78 (.F32)
+    # writes lane 0 as one f32 instead of a packed result.
+    def h2(self, expr, swz, abs_, neg):
+        if swz == 1:
+            v = 'vec2(uintBitsToFloat(%s))' % expr
+        else:
+            v = 'unpackHalf2x16(%s)%s' % (expr, {0: '', 2: '.xx', 3: '.yy'}[swz])
+        if abs_:
+            v = 'abs(%s)' % v
+        if neg:
+            v = '-(%s)' % v
+        return v
+
+    def h2_operands(self, i, n):
+        """Logical half2 sources: src0 at 24..32, then the operands of the ALU form."""
+        f = i.form
+        if f in (3, 5) and i.b(91):
+            raise Unsupported('bindless cbuf operand')
+        if f in (2, 4):
+            s32 = '0x%08xu' % i.f(32, 64)
+        elif f in (3, 5):
+            s32 = self.cb(i.f(54, 59), i.f(38, 54))
+        elif f in (6, 7):
+            s32 = self.UR(i.f(32, 38))
+        else:
+            s32 = self.R(i.f(32, 40))
+        a32 = self.h2(s32, 0 if f in (2, 4) else i.f(60, 62), i.b(62), i.b(63))
+        a = self.h2(self.R(i.f(24, 32)), i.f(74, 76), i.b(73), i.b(72))
+        if n == 2:
+            return a, a32
+        a64 = self.h2(self.R(i.f(64, 72)), i.f(81, 83), i.b(83), i.b(84))
+        if f in (2, 3, 7):
+            return a, a64, a32
+        return a, a32, a64
+
+    def h2_result(self, i, e):
+        if i.b(77):
+            e = 'clamp(%s, vec2(0.0), vec2(1.0))' % e
+        if i.b(78):
+            return self.write(i.f(16, 24), 'floatBitsToUint((%s).x)' % e)
+        return self.write(i.f(16, 24), 'packHalf2x16(%s)' % e)
+
+    def op_HADD2(self, i):
+        a, b = self.h2_operands(i, 2)
+        return self.h2_result(i, '(%s + %s)' % (a, b))
+
+    def op_HMUL2(self, i):
+        a, b = self.h2_operands(i, 2)
+        return self.h2_result(i, '(%s * %s)' % (a, b))
+
+    def op_HFMA2(self, i):
+        a, b, c = self.h2_operands(i, 3)
+        return self.h2_result(i, 'fma(%s, %s, %s)' % (a, b, c))
+
     # -- integer ALU
     def op_IADD3(self, i):
         s0, s1, s2, m0, m1, m2 = self.alu_srcs(i)
@@ -771,6 +826,25 @@ class Translator:
         n = {4: 1, 5: 2, 6: 4}[mt]
         return 'uint ga%x = %s; %s' % (i.off, a, ' '.join('gmem.w[ga%x + %du] = %s;' % (i.off, k, self.R(s + k)) for k in range(n)))
 
+    def op_RED(self, i):
+        """Global reduction (atomic without result): op 87..90, type 73..76 (u32 / s32 only)."""
+        if i.op12 != 0x98e:
+            raise Unsupported('RED form')
+        typ, op = i.f(73, 76), i.f(87, 90)
+        if typ not in (0, 1):
+            raise Unsupported('RED type %d' % typ)
+        fn = {0: 'atomicAdd', 1: 'atomicMin', 2: 'atomicMax', 5: 'atomicAnd', 6: 'atomicOr', 7: 'atomicXor',
+              8: 'atomicExchange'}.get(op)
+        if fn is None:
+            raise Unsupported('RED op %d' % op)
+        self.gmem_writes = True
+        a = self.gaddr(i, ureg_lo=64)
+        v = self.R(i.f(32, 40))
+        if typ == 1 and op in (1, 2):
+            self.need.add('gmem_int')
+            return '%s(gmemi.i[%s], int(%s));' % (fn, a, v)
+        return '%s(gmem.w[%s], %s);' % (fn, a, v)
+
     # -- textures
     def tex_common(self, i, kind):
         if i.op12 not in (0xb60, 0xb66, 0xb63, 0xb69):
@@ -877,6 +951,41 @@ class Translator:
         vals = ['floatBitsToUint(%s.%s)' % (t, c) for c in 'xyzw']
         return 'vec4 %s = texelFetch(%s, %s, %s); %s' % (t, name, vec, lod, ' '.join(self.tex_dsts(i, vals)))
 
+    def op_TLD4(self, i):
+        name, stype, ncoord, array, _ = self.tex_common(i, 'TLD4')
+        shadow = i.b(78)
+        offset_mode = i.f(76, 78)
+        if offset_mode == 2:
+            raise Unsupported('TLD4 per-pixel offsets')
+        if shadow:
+            stype += 'Shadow'
+            self.textures[(i.f(54, 59), i.f(40, 54) * 4)] = stype
+        n0 = ncoord + (1 if array else 0)
+        n1 = (1 if offset_mode == 1 else 0) + (1 if shadow else 0)
+        src0, src1 = self.tex_srcs(i, n0, n1, i.b(60))
+        f = ['uintBitsToFloat(%s)' % s for s in src0]
+        coords = (f[1:] + ['float(%s)' % src0[0]]) if array else f
+        vec = 'vec%d(%s)' % (len(coords), ', '.join(coords))
+        k = 0
+        offset = None
+        if offset_mode == 1:
+            # packed 6-bit signed offsets, x in bits 0..5, y in bits 8..13
+            o = src1[k]
+            offset = 'ivec2(bitfieldExtract(int(%s), 0, 6), bitfieldExtract(int(%s), 8, 6))' % (o, o)
+            k += 1
+        if shadow:
+            call = 'textureGather(%s, %s, uintBitsToFloat(%s)' % (name, vec, src1[k])
+        else:
+            call = 'textureGather(%s, %s' % (name, vec)
+        if offset:
+            call = call.replace('textureGather(', 'textureGatherOffset(') + ', ' + offset
+        if not shadow:
+            call += ', %d' % i.f(87, 89)
+        call += ')'
+        t = 'tv%x' % i.off
+        vals = ['floatBitsToUint(%s.%s)' % (t, c) for c in 'xyzw']
+        return 'vec4 %s = %s; %s' % (t, call, ' '.join(self.tex_dsts(i, vals)))
+
     def op_TXQ(self, i):
         if i.op12 != 0xb6f:
             raise Unsupported('TXQ bindless')
@@ -969,6 +1078,8 @@ class Translator:
         if 'gmem' in self.need:
             ro = '' if getattr(self, 'gmem_writes', False) else 'readonly '
             L.append('layout(std430, set = %d, binding = 17) %sbuffer GMem { uint w[]; } gmem;' % (stage_set, ro))
+            if 'gmem_int' in self.need:
+                L.append('layout(std430, set = %d, binding = 17) buffer GMemI { int i[]; } gmemi;' % stage_set)
             L.append('layout(push_constant) uniform Push { uint64_t gmem_base; } push;')
             L.append('uint gidx(uint64_t a) { return uint((a - push.gmem_base) >> 2); }')
             if 'gbyte' in self.need:

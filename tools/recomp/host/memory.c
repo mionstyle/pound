@@ -197,6 +197,23 @@ void mem_query(uint64_t addr, memory_info_t *out)
     out->size = hi - lo;
 }
 
+// 1 if [addr, addr + size) lies in mapped guest memory (host code reading guest data).
+int mem_is_mapped(uint64_t addr, uint64_t size)
+{
+    while (size) {
+        memory_info_t mi;
+        mem_query(addr, &mi);
+        if (mi.state == MS_FREE || mi.state == MS_INACCESSIBLE || !mi.size)
+            return 0;
+        uint64_t n = mi.addr + mi.size - addr;
+        if (n >= size)
+            return 1;
+        addr += n;
+        size -= n;
+    }
+    return 1;
+}
+
 uint64_t mem_used_total(void)
 {
     uint64_t total = 0;

@@ -15,6 +15,10 @@ typedef struct
 {
     uint64_t obj, addr;
     uint32_t w, h, depth, levels, format; // format: NVNformat (NVN numbering)
+    uint32_t target;                      // NVNtextureTarget (1 2D, 4 2D array, 8 cube, ...)
+    uint64_t packaged_layout;             // nvnTextureBuilderSetPackagedTextureLayout (0: none)
+    uint32_t flags;                       // NVNtextureFlags
+    uint32_t layer, level;                // texture view: first layer / level (render targets)
 } rnd_tex_t;
 
 typedef struct { uint64_t addr, size; } rnd_range_t;

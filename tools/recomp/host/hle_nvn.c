@@ -336,6 +336,22 @@ static void tex_builder_SetStorage(cpu_t *c) // (builder, pool, offset)
     prop_set(A(0), "Storage", v, 2);
 }
 
+// The layout is passed by pointer (8 bytes); the builder may live on the stack, so keep the value.
+static void tex_builder_SetPackagedTextureLayout(cpu_t *c)
+{
+    uint64_t v[1] = { A(1) ? rd64(A(1)) : 0 }, p[1] = { A(1) };
+    prop_set(A(0), "PackagedLayout", v, 1);
+    prop_set(A(0), "PackagedTextureLayout", p, 1); // (what the generic getter returns)
+}
+
+// Texture views are small structs the game resets and reuses: forget the previous ranges.
+static void view_SetDefaults(cpu_t *c)
+{
+    uint64_t z[4] = { 0 };
+    prop_set(A(0), "Layers", z, 4);
+    prop_set(A(0), "Levels", z, 4);
+}
+
 static void tex_Initialize(cpu_t *c)
 {
     prop_copy_all(A(1), A(0));
@@ -589,9 +605,18 @@ static void cmd_SetRenderTargets(cpu_t *c)
     op.a[0] = (uint64_t)n;
     for (int i = 0; i < n; ++i)
         op.a[1 + i] = A(2) ? rd64(A(2) + 8ull * i) : 0;
-    uint64_t depth = A(4); // (payload: the depth target)
+    uint64_t depth = A(4); // (payload: the depth target, then { first layer, base level } per view)
     memcpy(op.p, &depth, 8);
-    op.n = 8;
+    uint32_t view[9][2] = { { 0 } };
+    for (int i = 0; i < 9; ++i) {
+        uint64_t v = i < n ? (A(3) ? rd64(A(3) + 8ull * i) : 0) : i == 8 ? A(5) : 0;
+        if (v) {
+            view[i][0] = (uint32_t)prop_get(v, "Layers", 0);
+            view[i][1] = (uint32_t)prop_get(v, "Levels", 0);
+        }
+    }
+    memcpy(op.p + 8, view, sizeof view);
+    op.n = 8 + sizeof view;
     rec_push(A(0), &op);
 }
 
@@ -857,6 +882,7 @@ static void cmd_CallCommands(cpu_t *c) // (cmdbuf, int count, const NVNcommandHa
 
 static uint64_t    g_targets[8]; // currently bound color targets (queue state)
 static uint64_t    g_depth_target;
+static uint32_t    g_target_view[9][2]; // { first layer, base level } of targets 0..7 and depth
 static uint64_t    g_draws_this_frame;
 static rnd_state_t g_st;         // queue state seen by draws
 static int      g_gpu = -1;   // the host GPU renderer is active (renderer.h), decided at the first submit
@@ -873,12 +899,17 @@ static void tex_desc(uint64_t tex, rnd_tex_t *d)
 {
     uint64_t pool = prop_get(tex, "Storage", 0);
     d->obj    = tex;
-    d->addr   = pool ? prop_get(pool, "Storage", 0) + prop_get(tex, "Storage", 1) : 0;
+    uint64_t base = pool ? prop_get(pool, "Storage", 0) : 0;
+    d->addr   = base ? base + prop_get(tex, "Storage", 1) : 0;
     d->w      = (uint32_t)prop_get(tex, "Size", 0);
     d->h      = (uint32_t)prop_get(tex, "Size", 1);
     d->depth  = (uint32_t)prop_get(tex, "Size", 2);
     d->levels = (uint32_t)prop_get(tex, "Levels", 0);
     d->format = (uint32_t)prop_get(tex, "Format", 0);
+    d->target = (uint32_t)prop_get(tex, "Target", 0);
+    d->flags  = (uint32_t)prop_get(tex, "Flags", 0);
+    d->packaged_layout = prop_get(tex, "PackagedLayout", 0);
+    d->layer = d->level = 0;
     if (!d->depth) d->depth = 1;
     if (!d->levels || d->levels > 16) d->levels = 1;
 }
@@ -1051,13 +1082,18 @@ static void draw(const rnd_draw_t *d)
     for (int k = 0; k < 8; ++k) {
         if (g_targets[k]) {
             tex_desc(g_targets[k], &g_st.color[k]);
+            g_st.color[k].layer = g_target_view[k][0];
+            g_st.color[k].level = g_target_view[k][1];
             g_st.ncolor = k + 1;
         } else {
             memset(&g_st.color[k], 0, sizeof g_st.color[k]);
         }
     }
-    if (g_depth_target)
+    if (g_depth_target) {
         tex_desc(g_depth_target, &g_st.depth);
+        g_st.depth.layer = g_target_view[8][0];
+        g_st.depth.level = g_target_view[8][1];
+    }
     else
         memset(&g_st.depth, 0, sizeof g_st.depth);
     rnd_draw(&g_st, d);
@@ -1085,6 +1121,7 @@ static void run_list(uint64_t handle, int depth)
             memset(g_targets, 0, sizeof g_targets);
             for (uint64_t k = 0; k < op->a[0]; ++k) g_targets[k] = op->a[1 + k];
             memcpy(&g_depth_target, op->p, 8);
+            memcpy(g_target_view, op->p + 8, sizeof g_target_view);
             break;
         case OP_CLEAR: {
             static int logged;
@@ -1096,6 +1133,8 @@ static void run_list(uint64_t handle, int depth)
                 rnd_tex_t d;
                 if (g_targets[op->a[0] & 7]) {
                     tex_desc(g_targets[op->a[0] & 7], &d);
+                    d.layer = g_target_view[op->a[0] & 7][0];
+                    d.level = g_target_view[op->a[0] & 7][1];
                     rnd_clear_color(&d, (uint32_t)op->a[1], op->f);
                 }
                 break;
@@ -1353,6 +1392,8 @@ static const impl_t k_impl[] = {
     { "nvnTextureBuilderGetStorageSize", tex_builder_GetStorageSize },
     { "nvnTextureBuilderGetStorageAlignment", tex_builder_GetStorageAlignment },
     { "nvnTextureBuilderSetStorage", tex_builder_SetStorage },
+    { "nvnTextureBuilderSetPackagedTextureLayout", tex_builder_SetPackagedTextureLayout },
+    { "nvnTextureViewSetDefaults", view_SetDefaults },
     { "nvnTextureInitialize", tex_Initialize },
     { "nvnTextureGetWidth", tex_GetWidth },
     { "nvnTextureGetHeight", tex_GetHeight },

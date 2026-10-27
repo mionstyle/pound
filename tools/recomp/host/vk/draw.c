@@ -103,6 +103,7 @@ void vk_draw_frame_begin(int slot)
     if (!g_fs[slot].ok)
         frame_init(slot);
     g_fs[slot].used = 0;
+    vk_textures_frame_begin(slot);
     VK_CHECK(vkResetDescriptorPool(g_vk.dev, g_fs[slot].pool, 0));
 }
 
@@ -623,27 +624,32 @@ static void texture_binding(const rnd_state_t *s, int stage, const res_tex_t *t,
     out->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     out->sampler     = shadow ? g_shadow_sampler : g_sampler;
     out->imageView   = shadow ? g_dummy_depth[kind < 3 ? kind : 0] : g_dummy[kind];
-    if (t->bank != 2 || t->off < 0x20 || kind != 0)
+    if (t->bank != 2 || t->off < 0x20 || kind == 3)
         return;
     int       idx = (t->off - 0x20) / 8;
     rnd_tex_t tex;
     if (idx >= 32 || !s->tex[stage][idx] || !nvn_texture_of_handle(s->tex[stage][idx], &tex))
         return;
     vk_image_t *im = vk_image_of(&tex);
-    if (!im || !im->view)
+    if (!im)
         return;
     bool depth = (im->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
-    if (!shadow || depth) // (a color image cannot be read with a depth compare)
-        out->imageView = im->view;
+    if (shadow && !depth) // (a color image cannot be read with a depth compare)
+        return;
+    VkImageView v = vk_image_sample_view(im, kind);
+    if (!v)
+        return;
+    vk_image_sync(im);
+    out->imageView = v;
 }
 
 // ---- rendering passes ---------------------------------------------------------------------------
 
 static struct
 {
-    int     open;
-    VkImage color[8], depth;
-    int     ncolor;
+    int         open;
+    VkImageView color[8], depth;
+    int         ncolor;
 } g_pass;
 
 void vk_end_rendering(void)
@@ -656,11 +662,16 @@ void vk_end_rendering(void)
     g_pass.open = 0;
 }
 
-static void begin_rendering(vk_image_t *const color[8], int ncolor, vk_image_t *depth)
+// Attachments are views of one layer / level (render target texture views).
+static void begin_rendering(vk_image_t *const color[8], const rnd_tex_t *ct, int ncolor, vk_image_t *depth,
+                            const rnd_tex_t *dt)
 {
-    bool same = g_pass.open && g_pass.ncolor == ncolor && g_pass.depth == (depth ? depth->image : VK_NULL_HANDLE);
+    VkImageView cv[8], dv = depth ? vk_image_view(depth, dt->layer, dt->level) : VK_NULL_HANDLE;
+    for (int i = 0; i < ncolor; ++i)
+        cv[i] = color[i] ? vk_image_view(color[i], ct[i].layer, ct[i].level) : VK_NULL_HANDLE;
+    bool same = g_pass.open && g_pass.ncolor == ncolor && g_pass.depth == dv;
     for (int i = 0; same && i < ncolor; ++i)
-        same = g_pass.color[i] == (color[i] ? color[i]->image : VK_NULL_HANDLE);
+        same = g_pass.color[i] == cv[i];
     if (same)
         return;
     vk_end_rendering();
@@ -668,22 +679,24 @@ static void begin_rendering(vk_image_t *const color[8], int ncolor, vk_image_t *
     uint32_t                  w = 16384, h = 16384;
     for (int i = 0; i < ncolor; ++i) {
         ca[i] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                                             .imageView = color[i] ? color[i]->view : VK_NULL_HANDLE,
-                                             .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                             .imageView = cv[i], .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
                                              .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
-        g_pass.color[i] = color[i] ? color[i]->image : VK_NULL_HANDLE;
+        g_pass.color[i] = cv[i];
         if (color[i]) {
-            if (color[i]->key.w < w) w = color[i]->key.w;
-            if (color[i]->key.h < h) h = color[i]->key.h;
+            uint32_t lv = ct[i].level < color[i]->levels ? ct[i].level : 0;
+            uint32_t lw = color[i]->key.w >> lv, lh = color[i]->key.h >> lv;
+            if ((lw ? lw : 1) < w) w = lw ? lw : 1;
+            if ((lh ? lh : 1) < h) h = lh ? lh : 1;
         }
     }
-    VkRenderingAttachmentInfo da = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                                     .imageView = depth ? depth->view : VK_NULL_HANDLE,
+    VkRenderingAttachmentInfo da = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dv,
                                      .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
                                      .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
     if (depth) {
-        if (depth->key.w < w) w = depth->key.w;
-        if (depth->key.h < h) h = depth->key.h;
+        uint32_t lv = dt->level < depth->levels ? dt->level : 0;
+        uint32_t lw = depth->key.w >> lv, lh = depth->key.h >> lv;
+        if ((lw ? lw : 1) < w) w = lw ? lw : 1;
+        if ((lh ? lh : 1) < h) h = lh ? lh : 1;
     }
     bool has_depth   = depth && (depth->aspect & VK_IMAGE_ASPECT_DEPTH_BIT);
     bool has_stencil = depth && (depth->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
@@ -693,7 +706,7 @@ static void begin_rendering(vk_image_t *const color[8], int ncolor, vk_image_t *
     vkCmdBeginRendering(vk_cmd(), &ri);
     g_pass.open   = 1;
     g_pass.ncolor = ncolor;
-    g_pass.depth  = depth ? depth->image : VK_NULL_HANDLE;
+    g_pass.depth  = dv;
 }
 
 // $RECOMP_DRAW_LOG_FRAME=<n>: one line per draw of frame n (targets, shaders, textures; a
@@ -720,14 +733,21 @@ static void log_frame_draw(const rnd_state_t *s, const rnd_draw_t *d, const shad
         n += snprintf(line + n, sizeof line - n, " d:%llx dt%u dw%u", (unsigned long long)depth->key.obj, s->depth_test,
                       s->depth_write);
     n += snprintf(line + n, sizeof line - n, " blend %x |", s->blend_enable);
+    // the textures the shaders sample
+    const shader_t *sh[2] = { vs, fs };
     for (int st = 0; st < 2 && n < (int)sizeof line - 80; ++st)
-        for (int i = 0; i < 32 && n < (int)sizeof line - 80; ++i) {
-            rnd_tex_t t;
-            if (!s->tex[st][i] || !nvn_texture_of_handle(s->tex[st][i], &t))
+        for (int k = 0; sh[st] && k < sh[st]->ntex && n < (int)sizeof line - 80; ++k) {
+            const res_tex_t *r = &sh[st]->tex[k];
+            int              i = (r->off - 0x20) / 8;
+            rnd_tex_t        t;
+            if (r->bank != 2 || i < 0 || i >= 32 || !s->tex[st][i] || !nvn_texture_of_handle(s->tex[st][i], &t)) {
+                n += snprintf(line + n, sizeof line - n, " %c%d:none", st ? 'f' : 'v', i);
                 continue;
+            }
             vk_image_t *im = vk_image_of(&t);
-            n += snprintf(line + n, sizeof line - n, " %c%d:%llx(%ux%u f%x)%s", st ? 'f' : 'v', i, (unsigned long long)t.obj,
-                          t.w, t.h, t.format, im && im->gpu_written ? "" : "*");
+            n += snprintf(line + n, sizeof line - n, " %c%d:%llx(%ux%u f%x %s)%s", st ? 'f' : 'v', i,
+                          (unsigned long long)t.obj, t.w, t.h, t.format, r->type,
+                          im && (im->gpu_written || im->uploaded) ? "" : "*");
         }
     host_log("%s", line);
 }
@@ -1010,11 +1030,15 @@ void rnd_draw(const rnd_state_t *s, const rnd_draw_t *d)
     vkUpdateDescriptorSets(g_vk.dev, nw, w, 0, NULL);
 
     log_frame_draw(s, d, vs, fs, color, ncolor, depth);
+    void vk_debug_target_written(vk_image_t *im);
     for (int k = 0; k < ncolor; ++k)
-        if (color[k]) color[k]->gpu_written = true;
+        if (color[k]) {
+            color[k]->gpu_written = true;
+            vk_debug_target_written(color[k]);
+        }
     if (depth) depth->gpu_written = true;
     // Record (textures were resolved above: nothing below creates images).
-    begin_rendering(color, ncolor, depth);
+    begin_rendering(color, s->color, ncolor, depth, &s->depth);
     VkCommandBuffer cb = vk_cmd();
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, 0, NULL);
