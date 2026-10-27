@@ -628,6 +628,59 @@ static void queue_Present(cpu_t *c) // (queue, window, int index)
     RET(0);
 }
 
+// ---- shader capture ----------------------------------------------------------------------
+//
+// nvnProgramSetShaders(program, int count, const NVNshaderData* data): data[i] = {u64 code GPU
+// address, const void* control} (+ u64 debug hash for the Ext variant, stride 24). With
+// $RECOMP_SHADER_DUMP=<dir>, every new code blob is written as <dir>/<hash>.code (64 KB
+// window from the code address) with its control section as <hash>.ctrl (4 KB).
+
+static uint64_t fnv64(const uint8_t *p, size_t n)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; ++i) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
+static void dump_blob(const char *dir, uint64_t h, const char *ext, uint64_t addr, size_t n)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%016llx.%s", dir, (unsigned long long)h, ext);
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return; }
+    f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(mem_host(addr), 1, n, f);
+    fclose(f);
+}
+
+static void set_shaders(cpu_t *c, int stride)
+{
+    const char *dir = getenv("RECOMP_SHADER_DUMP");
+    int         n   = (int)A(1);
+    for (int i = 0; i < n && i < 8; ++i) {
+        uint64_t e = A(2) + (uint64_t)(stride * i);
+        uint64_t code = rd64(e), ctrl = rd64(e + 8);
+        if (!code)
+            continue;
+        uint64_t h = fnv64(mem_host(code), 0x400);
+        uint64_t v[2] = { code, ctrl };
+        char key[16];
+        snprintf(key, sizeof key, "Stage%d", i);
+        prop_set(A(0), key, v, 2);
+        if (dir) {
+            dump_blob(dir, h, "code", code, 0x10000);
+            if (ctrl) dump_blob(dir, h, "ctrl", ctrl, 0x1000);
+        }
+    }
+    uint64_t v[1] = { (uint64_t)n };
+    prop_set(A(0), "NumStages", v, 1);
+    RET(1);
+}
+
+static void prog_SetShaders(cpu_t *c) { set_shaders(c, 16); }
+static void prog_SetShadersExt(cpu_t *c) { set_shaders(c, 24); }
+
 static void sync_Wait(cpu_t *c) { RET(0); } // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
 static void ret_true(cpu_t *c) { RET(1); }
 static void ret_zero(cpu_t *c) { RET(0); }
@@ -685,7 +738,8 @@ static const impl_t k_impl[] = {
     { "nvnQueuePresentTexture", queue_Present },
     { "nvnSyncWait", sync_Wait },
     { "nvnQueueGetError", ret_zero },
-    { "nvnProgramSetShaders", ret_true },
+    { "nvnProgramSetShaders", prog_SetShaders },
+    { "nvnProgramSetShadersExt", prog_SetShadersExt },
 };
 
 // ---- name-based fallback ---------------------------------------------------------------
