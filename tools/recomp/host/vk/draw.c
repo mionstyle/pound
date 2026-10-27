@@ -696,6 +696,42 @@ static void begin_rendering(vk_image_t *const color[8], int ncolor, vk_image_t *
     g_pass.depth  = depth ? depth->image : VK_NULL_HANDLE;
 }
 
+// $RECOMP_DRAW_LOG_FRAME=<n>: one line per draw of frame n (targets, shaders, textures; a
+// texture marked * has never been written by the GPU, so it reads as zero / debug fill).
+static void log_frame_draw(const rnd_state_t *s, const rnd_draw_t *d, const shader_t *vs, const shader_t *fs,
+                           vk_image_t *const color[8], int ncolor, const vk_image_t *depth)
+{
+    static long want = -2;
+    if (want == -2) {
+        const char *e = getenv("RECOMP_DRAW_LOG_FRAME");
+        want          = e ? atol(e) : -1;
+    }
+    if (want < 0 || (long)g_vk_frame + 1 != want)
+        return;
+    char line[2048];
+    int  n = snprintf(line, sizeof line, "[frame %ld] %s %u x%u vs %016llx fs %016llx ->", want,
+                      d->indexed ? "elements" : "arrays", d->count, d->instances,
+                      vs ? (unsigned long long)vs->hash : 0ull, fs ? (unsigned long long)fs->hash : 0ull);
+    for (int k = 0; k < ncolor; ++k)
+        if (color[k])
+            n += snprintf(line + n, sizeof line - n, " c%d:%llx(%ux%u f%x)", k, (unsigned long long)color[k]->key.obj,
+                          color[k]->key.w, color[k]->key.h, color[k]->key.format);
+    if (depth)
+        n += snprintf(line + n, sizeof line - n, " d:%llx dt%u dw%u", (unsigned long long)depth->key.obj, s->depth_test,
+                      s->depth_write);
+    n += snprintf(line + n, sizeof line - n, " blend %x |", s->blend_enable);
+    for (int st = 0; st < 2 && n < (int)sizeof line - 80; ++st)
+        for (int i = 0; i < 32 && n < (int)sizeof line - 80; ++i) {
+            rnd_tex_t t;
+            if (!s->tex[st][i] || !nvn_texture_of_handle(s->tex[st][i], &t))
+                continue;
+            vk_image_t *im = vk_image_of(&t);
+            n += snprintf(line + n, sizeof line - n, " %c%d:%llx(%ux%u f%x)%s", st ? 'f' : 'v', i, (unsigned long long)t.obj,
+                          t.w, t.h, t.format, im && im->gpu_written ? "" : "*");
+        }
+    host_log("%s", line);
+}
+
 // ---- the draw -----------------------------------------------------------------------------------
 
 static void log_draw(const rnd_state_t *s, const rnd_draw_t *d)
@@ -973,6 +1009,10 @@ void rnd_draw(const rnd_state_t *s, const rnd_draw_t *d)
     }
     vkUpdateDescriptorSets(g_vk.dev, nw, w, 0, NULL);
 
+    log_frame_draw(s, d, vs, fs, color, ncolor, depth);
+    for (int k = 0; k < ncolor; ++k)
+        if (color[k]) color[k]->gpu_written = true;
+    if (depth) depth->gpu_written = true;
     // Record (textures were resolved above: nothing below creates images).
     begin_rendering(color, ncolor, depth);
     VkCommandBuffer cb = vk_cmd();

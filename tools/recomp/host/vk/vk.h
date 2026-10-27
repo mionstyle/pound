@@ -54,7 +54,8 @@ _Noreturn void vk_fatal(void);
 // ---- device.c
 #define VK_FRAMES 3
 VkCommandBuffer vk_cmd(void);                  // the current frame's command buffer (recording)
-int             vk_slot(void);                 // the current frame slot (0..VK_FRAMES-1)
+int             vk_slot(void);
+extern uint64_t g_vk_frame;                    // presents so far                 // the current frame slot (0..VK_FRAMES-1)
 void            vk_end_rendering(void);        // (draw.c) close an open render pass before other commands
 void            vk_full_barrier(VkCommandBuffer cb);
 uint32_t        vk_memory_type(uint32_t bits, VkMemoryPropertyFlags want);
@@ -70,6 +71,7 @@ typedef struct
     bool               blit_src;   // the format supports vkCmdBlitImage as a source
     bool               attachment; // usable as a color / depth attachment
     VkImageView        view;       // level 0, layer 0 (rendering and 2D sampling)
+    bool               gpu_written; // rendered into or cleared by the GPU at least once
 } vk_image_t;
 
 VkFormat    vk_format(uint32_t nvn_format);

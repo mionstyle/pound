@@ -45,6 +45,12 @@ RECOMP_SAVE_DIR=save ./rr_full [-v|-vv] <exefs dir> <romfs dir>
 OPT=-O0 host/build_windows.sh gen/ win/ rtld sdk main               # ~hours on 2 cores
 ```
 
+Debug helpers added on the PC: `tools/recomp/disasm.py <module.bin> 0x<offset>` (capstone
+disassembly around an `addr_describe` offset such as main+0x32008c, with symbols),
+`RECOMP_NVN_LOG_CALLER=main+0x3200` (generic NVN calls by return address, printed with the
+caller), `RECOMP_LIST_TRACE=1` (command list recording / calls / submits),
+`RECOMP_DRAW_LOG_FRAME=<n>`.
+
 Useful environment variables: `RECOMP_SPV_DIR` (shader cache, default `spv`), `RECOMP_GPU=0`
 (no Vulkan: CPU clears + GDI), `RECOMP_VK_VALIDATION=1`, `RECOMP_DRAW_LOG=<n>` (first n draws in
 full), `RECOMP_VK_DEBUG_FILL=1` (new images start in a colour picked from their address),
@@ -197,16 +203,29 @@ LAS Recomp (his BotW port) into a new project for FE on Switch 2.
 
 ## Next steps for the renderer (in order)
 
-1. Only one draw per frame is executed at the title stage: the main thread submits one
-   list per frame (37 ops, the frame blit). Worker threads (0x12c..0x130) record a list per
-   frame (15 ops, 1 draw) on command buffers 0x30....bd8 that are never submitted nor called
-   (`RECOMP_LIST_TRACE=1` shows it). Those same command buffers get NVN2's
-   `nvnCommandBufferSetRecordingMode(cmdbuf, mode 0/1, offset, 0xc00000, flags)` around 6
-   times a frame, with offsets stepping by 0xc00000 (a triple-buffered 12 MB ring): the
-   recording mode presumably makes them record into memory the main command buffer runs.
-   Next: reverse that proc's semantics (Ghidra on the game's callers / the NVN2 driver in
-   sdk), then execute those lists at the right place. (Also fixed: recorder slots are freed
-   at `nvnCommandBufferFinalize`; not the cause.)
+1. **Goal (agreed with the owner): the title menu drawn.** State on 2026-10-27, end of day:
+   - FIXED: only 1 draw per frame ran because DKB calls `nvnCommandBuffer{Control,Command}MemoryUsed`
+     right after `EndRecording` (main+0x32008c / +0x3200a4) and skips lists for which both
+     are 0 - the generic HLE answered 0, so every worker-thread list was dropped. Now
+     implemented (bytes recorded, reset at `AddCommandMemory`): ~8000 draws / 400 frames run.
+   - `SetRecordingMode` was a red herring: its real signature is (cmdbuf, mode 0/1/2); the
+     "offset / 12 MB / flags" seen in logs were stale registers. `CopyCommands` and
+     `SubmitDeviceCommands` are never called (checked over ~700 frames).
+   - A frame now runs DKB's whole pipeline (~60 passes: G-buffer resolve, lighting, bloom
+     downsample chain 960x540 -> 30x17, composite into the 1920x1080 R11G11B10F scene target,
+     blit to the 2880x1620 window texture), but the output is still black. Likely causes,
+     in order: (a) two heavily used fragment shaders are not in the cache:
+     21b2d7f1d19816b9 (HADD2, op 0x230, packed half add) and 70cf6e674f3066ca (TLD4 0xb63,
+     textureGather) - ~18000 draws skipped per 240 s run; implement both in sm86/translate.py
+     (NAK `sm70_encode.rs` has the encodings); (b) textures filled by the CPU (RomFS) read as
+     zero (item 2 below); (c) six colour attachments bound to the same texture (cube faces /
+     layers: texture views in `SetRenderTargets` are ignored); (d) banks 0/1 and gmem (LDG)
+     bound as zeros. Use `RECOMP_DRAW_LOG_FRAME=<n>` (one line per draw; textures marked * were
+     never written by the GPU) and `RECOMP_VK_DEBUG_FILL=1` to see which pass loses the image.
+   - Translator fixes today: PLOP3 bit 67 = source c is a uniform predicate (P = UP after
+     UISETP); LDG 0x381 = register-only address form, 64-bit flag in bit 72.
+   - The scene geometry/UI only appears later in the run: by frame 400 only fullscreen passes
+     draw; use `RECOMP_AUTO_PRESS=40` and log frames in the thousands.
 2. Guest texture uploads: textures the CPU fills (RomFS data) need a copy from guest memory
    with T239 block-linear deswizzling (LAS Recomp `tegra.c`; the byte order differs from
    Switch 1) and BCn/ASTC formats; samplers from `nvnSamplerPoolRegisterSampler`.

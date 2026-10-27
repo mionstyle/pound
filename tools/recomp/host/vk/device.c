@@ -16,7 +16,8 @@
 #include <string.h>
 #include <windows.h>
 
-VkG g_vk;
+VkG      g_vk;
+uint64_t g_vk_frame;
 
 _Noreturn void vk_fatal(void)
 {
@@ -407,6 +408,7 @@ static void readback_end(vk_image_t *src, uint64_t frame)
 void rnd_present(const rnd_tex_t *t, const int32_t crop[4], uint64_t frame)
 {
     void vk_draw_stats(void);
+    g_vk_frame = frame;
     if (frame % 300 == 0)
         vk_draw_stats();
     vk_end_rendering();
@@ -488,6 +490,7 @@ void rnd_clear_color(const rnd_tex_t *t, uint32_t mask, const float rgba[4])
         if (logged++ < 10)
             VK_LOG("clear with channel mask 0x%x done as a full clear", mask);
     }
+    im->gpu_written = true;
     VkClearColorValue       v  = { { rgba[0], rgba[1], rgba[2], rgba[3] } };
     VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vkCmdClearColorImage(cb, im->image, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &rg);

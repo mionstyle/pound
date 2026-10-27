@@ -445,6 +445,7 @@ typedef struct
 {
     uint64_t cmdbuf; // recording command buffer
     rlist_t  cur;
+    uint64_t used;   // bytes "written" to its command memory since the last AddCommandMemory
 } recorder_t;
 
 #define MAX_REC 256
@@ -481,7 +482,30 @@ static void cmd_Finalize(cpu_t *c)
     if (r) {
         r->cmdbuf = 0;
         r->cur.n  = 0;
+        r->used   = 0;
     }
+    pthread_mutex_unlock(&g_rlock);
+}
+
+// Memory use of a command buffer. Games check it after EndRecording: DKB treats a list
+// with no command and no control memory used as empty and never submits it.
+static uint64_t cmd_used(uint64_t cmdbuf)
+{
+    pthread_mutex_lock(&g_rlock);
+    recorder_t *r = rec_of(cmdbuf, 0);
+    uint64_t    u = r ? r->used : 0;
+    pthread_mutex_unlock(&g_rlock);
+    return u;
+}
+static void cmd_GetCommandMemoryUsed(cpu_t *c) { RET(cmd_used(A(0))); }
+static void cmd_GetControlMemoryUsed(cpu_t *c) { uint64_t u = cmd_used(A(0)); RET(u ? 64 + u / 8 : 0); }
+
+static void cmd_AddCommandMemory(cpu_t *c) // (cmd, pool, offset, size): a new chunk, nothing used yet
+{
+    pthread_mutex_lock(&g_rlock);
+    recorder_t *r = rec_of(A(0), 0);
+    if (r)
+        r->used = 0;
     pthread_mutex_unlock(&g_rlock);
 }
 
@@ -503,6 +527,7 @@ static void rec_push(uint64_t cmdbuf, const rop_t *op)
             r->cur.ops = realloc(r->cur.ops, sizeof(rop_t) * (size_t)r->cur.cap);
         }
         r->cur.ops[r->cur.n++] = *op;
+        r->used += 32; // (a nominal size per command)
     } else {
         ++g_stat_lost;
     }
@@ -530,8 +555,8 @@ static void cmd_EndRecording(cpu_t *c)
     int             nd = 0;
     for (int i = 0; rr && i < rr->cur.n; ++i) nd += is_draw_op(rr->cur.ops[i].op);
     if (rr && rr->cur.n > 1 && nd && traced++ < 300) { // (lists with state and draws)
-        host_log("render: cmdbuf 0x%llx ends list 0x%llx: %d ops, %d draws (thread 0x%x)", (unsigned long long)A(0),
-                 (unsigned long long)h, rr ? rr->cur.n : -1, nd, kernel_current_thread()->handle);
+        host_log("render: cmdbuf 0x%llx ends list 0x%llx: %d ops, %d draws (thread 0x%x, from %s)", (unsigned long long)A(0),
+                 (unsigned long long)h, rr ? rr->cur.n : -1, nd, kernel_current_thread()->handle, addr_describe(c->x[30]));
     }
     pthread_mutex_lock(&g_rlock);
     recorder_t *r = rec_of(A(0), 0);
@@ -1334,6 +1359,9 @@ static const impl_t k_impl[] = {
     { "nvnTextureGetDepth", tex_GetDepth },
     { "nvnCommandBufferEndRecording", cmd_EndRecording },
     { "nvnCommandBufferGetCommandMemoryFree", cmd_GetMemoryFree },
+    { "nvnCommandBufferGetCommandMemoryUsed", cmd_GetCommandMemoryUsed },
+    { "nvnCommandBufferGetControlMemoryUsed", cmd_GetControlMemoryUsed },
+    { "nvnCommandBufferAddCommandMemory", cmd_AddCommandMemory },
     { "nvnCommandBufferGetControlMemoryFree", cmd_GetMemoryFree },
     { "nvnWindowBuilderSetTextures", win_builder_SetTextures },
     { "nvnWindowInitialize", win_Initialize },
@@ -1384,10 +1412,17 @@ static void generic_proc(cpu_t *c)
     static const char *want = (const char *)1;
     if (want == (const char *)1)
         want = getenv("RECOMP_NVN_LOG");
+    // $RECOMP_NVN_LOG_CALLER=<text>: the same for calls whose return address (as
+    // addr_describe prints it, e.g. main+0x32008c) contains <text>.
+    static const char *caller = (const char *)1;
+    if (caller == (const char *)1)
+        caller = getenv("RECOMP_NVN_LOG_CALLER");
     static int logged;
-    if (want && strstr(g->name, want) && logged < 400 && ++logged)
-        host_log("nvn: %s(0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx)", g->name, (unsigned long long)A(0),
-                 (unsigned long long)A(1), (unsigned long long)A(2), (unsigned long long)A(3), (unsigned long long)A(4));
+    if (((want && strstr(g->name, want)) || (caller && strstr(addr_describe(c->x[30]), caller))) && logged < 400 &&
+        ++logged)
+        host_log("nvn: %s(0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx) from %s thread 0x%x", g->name, (unsigned long long)A(0),
+                 (unsigned long long)A(1), (unsigned long long)A(2), (unsigned long long)A(3), (unsigned long long)A(4),
+                 addr_describe(c->x[30]), kernel_current_thread()->handle);
     if (n == 0 && host_verbose)
         host_log("nvn: %s(0x%llx, 0x%llx, 0x%llx) [generic %s]", g->name, (unsigned long long)A(0),
                  (unsigned long long)c->x[1], (unsigned long long)c->x[2],

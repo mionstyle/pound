@@ -589,11 +589,10 @@ class Translator:
 
     # -- predicates
     def op_PLOP3(self, i):
-        if i.b(67):
-            raise Unsupported('PLOP3 upred')
         a = self.P(i.f(87, 90), i.b(90))
         b = self.P(i.f(77, 80), i.b(80))
-        c = self.P(i.f(68, 71), i.b(71))
+        # bit 67: source c is a uniform predicate (DKB: P = UP after a UISETP)
+        c = (self.UP if i.b(67) else self.P)(i.f(68, 71), i.b(71))
         lut0 = i.f(64, 67) | (i.f(72, 77) << 3)
         lut1 = i.f(16, 24)
         out = []
@@ -736,9 +735,10 @@ class Translator:
         self.need.add('gmem')
         r = i.f(24, 32)
         lo = self.R(r)
-        hi = self.R(r + 1) if (i.b(90) and r != RZ) else '0u'
+        wide = i.b(72) if i.op12 == 0x381 else i.b(90) # 64-bit register address
+        hi = self.R(r + 1) if (wide and r != RZ) else '0u'
         addr = 'packUint2x32(uvec2(%s, %s))' % (lo, hi)
-        if i.b(91):
+        if i.b(91) and i.op12 != 0x381:
             u = i.f(ureg_lo, ureg_lo + 6)
             if u != URZ:
                 uhi = self.UR(u + 1) if i.b(ureg_bit) else '0u'
@@ -749,7 +749,7 @@ class Translator:
         return 'gidx(%s + uint64_t(int64_t(%d)))' % (addr, off)
 
     def op_LDG(self, i):
-        if i.op12 != 0x981:
+        if i.op12 not in (0x981, 0x381): # (0x381: register address only, no uniform base)
             raise Unsupported('LDG form')
         mt, d = i.f(73, 76), i.f(16, 24)
         a = self.gaddr(i)
